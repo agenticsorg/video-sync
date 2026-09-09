@@ -72,6 +72,40 @@ pub struct VideoRecord {
     /// flow removes the summary.
     #[serde(default)]
     pub summary_generated_at: Option<DateTime<Utc>>,
+    // ── Description provenance ───────────────────────────────────────
+    // The companion to the summary_* block above. `description` itself
+    // is a bare string set through `update_metadata` edits and carries
+    // no record of who produced it, so nothing could tell a generated
+    // description from a hand-written one, nor a current one from one
+    // left behind by a Show Notes regen (the drift ADR-064 accepted as
+    // a known trade-off). These five fields close that gap.
+    //
+    // Every field is `#[serde(default)]`: records already on disk
+    // deserialise with `description_source: None`, which
+    // `description_is_regenerable` reads as "unknown provenance, leave
+    // it alone". Existing descriptions are therefore safe from any
+    // automated pass until something deliberately re-derives them.
+    /// Which pipeline authored the current description.
+    #[serde(default)]
+    pub description_source: Option<DescriptionSource>,
+    /// Drive file id of the Show Notes doc the description was derived
+    /// from. `None` for transcript-mode and manual descriptions.
+    #[serde(default)]
+    pub description_source_doc_id: Option<String>,
+    /// The record's `summary_prompt_version` at the moment the
+    /// description was derived. Compared against the current
+    /// `summary_prompt_version` to detect drift: when the Show Notes are
+    /// regenerated under a newer prompt, the description derived from
+    /// the older Show Notes becomes stale.
+    #[serde(default)]
+    pub description_source_prompt_version: Option<u32>,
+    /// When the current description was generated.
+    #[serde(default)]
+    pub description_generated_at: Option<DateTime<Utc>>,
+    /// When true, automated passes skip this record's description.
+    /// The operator-facing counterpart to `summary_locked`.
+    #[serde(default)]
+    pub description_locked: bool,
     // ── ADR-065: community contributor attribution ───────────────────
     /// Workspace email of the contributor who ingested this record
     /// (when their effective role at ingest time was Contributor, or
@@ -113,6 +147,14 @@ impl VideoRecord {
         let recorded_at = cmd.recorded_at.as_ref().and_then(|s| {
             DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
         });
+
+        // A description supplied at ingest came from the source platform,
+        // which makes it Manual by this enum's definition: no generator
+        // of ours owns it, so nothing may overwrite it unasked. Records
+        // indexed without one start at None and pick up a source the
+        // first time one is generated. Computed here rather than inline
+        // because the struct literal below moves `cmd.description`.
+        let description_source = cmd.description.as_ref().map(|_| DescriptionSource::Manual);
 
         let origin_location = PlatformLocation {
             platform: Platform::from(cmd.source_platform),
@@ -158,6 +200,11 @@ impl VideoRecord {
             summary_locked: false,
             summary_counts: None,
             summary_generated_at: None,
+            description_source,
+            description_source_doc_id: None,
+            description_source_prompt_version: None,
+            description_generated_at: None,
+            description_locked: false,
             contributor_email: cmd.contributor_email,
             contributor_chapter: cmd.contributor_chapter,
             pending_events: Vec::new(),
@@ -1146,6 +1193,132 @@ impl VideoRecord {
         })])
     }
 
+    // ── Description provenance ───────────────────────────────────
+
+    /// Store a generated description together with the provenance that
+    /// explains it. Overwrites unconditionally — the decision about
+    /// whether this record *should* be regenerated belongs to the
+    /// caller, which has `description_locked` and
+    /// `description_is_regenerable` to consult.
+    pub fn set_description_metadata(
+        &mut self,
+        cmd: SetDescriptionMetadata,
+    ) -> Result<Vec<CatalogEvent>, CatalogError> {
+        if !self.can_curate(&cmd.actor) {
+            return Err(CatalogError::Unauthorized);
+        }
+
+        let now = Utc::now();
+        let generated_at = cmd.generated_at.as_ref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc)))
+            .unwrap_or(now);
+
+        let length = cmd.text.chars().count();
+        self.description = Some(cmd.text);
+        self.description_source = Some(cmd.source);
+        self.description_source_doc_id = cmd.source_doc_id.clone();
+        self.description_source_prompt_version = cmd.source_prompt_version;
+        self.description_generated_at = Some(generated_at);
+
+        Ok(vec![CatalogEvent::DescriptionGenerated(DescriptionGenerated {
+            event_id: Uuid::new_v4(),
+            timestamp: now,
+            video_record_id: self.id,
+            source: cmd.source,
+            source_doc_id: cmd.source_doc_id,
+            source_prompt_version: cmd.source_prompt_version,
+            length,
+            generated_by: cmd.actor.user_id,
+            generated_at,
+        })])
+    }
+
+    /// Set description_locked = true so automated passes skip this
+    /// record. Idempotent at the field level; still emits for audit.
+    pub fn lock_description(
+        &mut self,
+        cmd: LockDescription,
+    ) -> Result<Vec<CatalogEvent>, CatalogError> {
+        if !self.can_curate(&cmd.actor) {
+            return Err(CatalogError::Unauthorized);
+        }
+        self.description_locked = true;
+        Ok(vec![CatalogEvent::DescriptionLocked(DescriptionLocked {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            video_record_id: self.id,
+            locked: true,
+            actor: cmd.actor.user_id,
+        })])
+    }
+
+    /// Set description_locked = false.
+    pub fn unlock_description(
+        &mut self,
+        cmd: UnlockDescription,
+    ) -> Result<Vec<CatalogEvent>, CatalogError> {
+        if !self.can_curate(&cmd.actor) {
+            return Err(CatalogError::Unauthorized);
+        }
+        self.description_locked = false;
+        Ok(vec![CatalogEvent::DescriptionLocked(DescriptionLocked {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            video_record_id: self.id,
+            locked: false,
+            actor: cmd.actor.user_id,
+        })])
+    }
+
+    /// Whether an unattended pass may overwrite this record's
+    /// description. False when the operator locked it, when a human or
+    /// the source platform wrote it, and when provenance is unknown —
+    /// which is every record predating these fields.
+    ///
+    /// An explicit operator click is not an unattended pass and does not
+    /// consult this.
+    pub fn description_is_regenerable(&self) -> bool {
+        if self.description_locked {
+            return false;
+        }
+        // An empty description has nothing to protect: generate away.
+        if self.description.as_deref().unwrap_or("").trim().is_empty() {
+            return true;
+        }
+        match self.description_source {
+            Some(source) => source.is_regenerable(),
+            None => false,
+        }
+    }
+
+    /// Whether the description has drifted from the Show Notes it was
+    /// derived from — i.e. the Show Notes were regenerated under a newer
+    /// prompt since. The drift ADR-064 accepted and left for a follow-up
+    /// to detect.
+    ///
+    /// Only meaningful for Show-Notes-derived descriptions: a
+    /// transcript-mode or manual description has no upstream doc to
+    /// drift from, and reports false.
+    pub fn description_is_stale(&self) -> bool {
+        match self.description_source {
+            Some(DescriptionSource::ShowNotesLlm)
+            | Some(DescriptionSource::ShowNotesDeterministic) => {}
+            _ => return false,
+        }
+        // Derived from a different doc than the record now carries.
+        if self.description_source_doc_id.is_some()
+            && self.description_source_doc_id != self.summary_doc_id
+        {
+            return true;
+        }
+        match (self.description_source_prompt_version, self.summary_prompt_version) {
+            (Some(derived), Some(current)) => derived < current,
+            // Derived before we recorded versions, or Show Notes since
+            // removed — neither is evidence of drift.
+            _ => false,
+        }
+    }
+
     // ── Internal helpers ─────────────────────────────────────
 
     fn apply_metadata_edits(
@@ -1158,6 +1331,15 @@ impl VideoRecord {
         }
         if let Some(ref desc) = edits.description {
             self.description = Some(desc.clone());
+            // Reaching the description through generic metadata edits
+            // means a human typed it: every generator goes through
+            // `set_description_metadata` instead. Stamp it Manual and
+            // drop the stale derivation pointers, so no automated pass
+            // treats hand-written text as its own to overwrite.
+            self.description_source = Some(DescriptionSource::Manual);
+            self.description_source_doc_id = None;
+            self.description_source_prompt_version = None;
+            self.description_generated_at = None;
         }
         if let Some(ref tags) = edits.tags {
             self.tags = tags.clone();

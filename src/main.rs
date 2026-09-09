@@ -118,6 +118,10 @@ fn format_events(events: &[video_sync::catalog::events::CatalogEvent]) -> String
             video_sync::catalog::events::CatalogEvent::UpstreamUnlinked(_) => "UpstreamUnlinked",
             video_sync::catalog::events::CatalogEvent::SummaryGenerated(_) => "SummaryGenerated",
             video_sync::catalog::events::CatalogEvent::SummaryLocked(_) => "SummaryLocked",
+            video_sync::catalog::events::CatalogEvent::DescriptionGenerated(_) => {
+                "DescriptionGenerated"
+            }
+            video_sync::catalog::events::CatalogEvent::DescriptionLocked(_) => "DescriptionLocked",
             video_sync::catalog::events::CatalogEvent::DestinationPublished(_) => {
                 "DestinationPublished"
             }

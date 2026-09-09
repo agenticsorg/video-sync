@@ -47,6 +47,19 @@ export interface VideoRecordJSON {
   summary_counts?: SummaryCountsJSON | null;
   /** ISO timestamp when the current summary was generated. */
   summary_generated_at?: string | null;
+  // Description provenance — the companion to the summary_* block.
+  // Absent on every record written before these fields existed, which
+  // `descriptionIsRegenerable` reads as "unknown, leave it alone".
+  /** Which pipeline authored the current description. */
+  description_source?: DescriptionSourceJSON | null;
+  /** Show Notes doc the description was derived from, when applicable. */
+  description_source_doc_id?: string | null;
+  /** `summary_prompt_version` at the moment the description was derived. */
+  description_source_prompt_version?: number | null;
+  /** ISO timestamp when the current description was generated. */
+  description_generated_at?: string | null;
+  /** When true, automated passes skip this record's description. */
+  description_locked?: boolean;
   // ADR-065 — community-contributor attribution.
   contributor_email?: string | null;
   contributor_chapter?: string | null;
@@ -85,6 +98,20 @@ export interface SummaryCountsJSON {
   t: number;
   c: number;
 }
+
+/**
+ * Which pipeline authored a record's description. Mirrors the Rust
+ * `DescriptionSource` enum, which serialises as a bare variant name.
+ *
+ * `Manual` covers both a human typing in the box and a description that
+ * arrived verbatim from the source platform: in neither case does a
+ * generator of ours own the text, so neither may be overwritten unasked.
+ */
+export type DescriptionSourceJSON =
+  | "ShowNotesLlm"
+  | "ShowNotesDeterministic"
+  | "Transcript"
+  | "Manual";
 
 export interface NoteJSON {
   id: string;

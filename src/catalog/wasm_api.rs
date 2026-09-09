@@ -365,6 +365,51 @@ impl WasmVideoRecord {
             .map_err(|e| JsError::new(&e.to_string()))?;
         Self::events_to_json(&events)
     }
+
+    /// Store a generated description together with its provenance.
+    /// Returns JSON array of emitted events.
+    pub fn set_description_metadata(&mut self, cmd_json: &str) -> Result<String, JsError> {
+        let cmd: SetDescriptionMetadata =
+            serde_json::from_str(cmd_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let events = self
+            .inner
+            .set_description_metadata(cmd)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Self::events_to_json(&events)
+    }
+
+    /// Lock the description so automated passes skip this record.
+    pub fn lock_description(&mut self, cmd_json: &str) -> Result<String, JsError> {
+        let cmd: LockDescription =
+            serde_json::from_str(cmd_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let events = self
+            .inner
+            .lock_description(cmd)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Self::events_to_json(&events)
+    }
+
+    /// Unlock the description, returning it to the automated pool.
+    pub fn unlock_description(&mut self, cmd_json: &str) -> Result<String, JsError> {
+        let cmd: UnlockDescription =
+            serde_json::from_str(cmd_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let events = self
+            .inner
+            .unlock_description(cmd)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Self::events_to_json(&events)
+    }
+
+    /// Whether an unattended pass may overwrite this description.
+    /// Mirrors `VideoRecord::description_is_regenerable`.
+    pub fn description_is_regenerable(&self) -> bool {
+        self.inner.description_is_regenerable()
+    }
+
+    /// Whether the description has drifted from its source Show Notes.
+    pub fn description_is_stale(&self) -> bool {
+        self.inner.description_is_stale()
+    }
 }
 
 impl WasmVideoRecord {

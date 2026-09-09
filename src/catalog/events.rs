@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::catalog::value_objects::{DerivationType, LinkOrigin, LocationRole, Platform, SourcePlatform, SummaryCounts, VideoStatus};
+use crate::catalog::value_objects::{DerivationType, DescriptionSource, LinkOrigin, LocationRole, Platform, SourcePlatform, SummaryCounts, VideoStatus};
 
 /// Domain events emitted by the Catalog bounded context.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +26,9 @@ pub enum CatalogEvent {
     UpstreamUnlinked(UpstreamUnlinked),
     SummaryGenerated(SummaryGenerated),
     SummaryLocked(SummaryLocked),
+    // ── Description provenance ────────────────────────────────────
+    DescriptionGenerated(DescriptionGenerated),
+    DescriptionLocked(DescriptionLocked),
     // ── ADR-077 §1: per-destination publish outcomes ──────────────
     DestinationPublished(DestinationPublished),
     DestinationFailed(DestinationFailed),
@@ -235,6 +238,36 @@ pub struct SummaryGenerated {
     /// When the model finished writing the Doc — may differ from
     /// `timestamp` if the command was retried.
     pub generated_at: DateTime<Utc>,
+}
+
+/// Emitted whenever the description is (re)generated with provenance.
+/// A plain `update_metadata` description edit does NOT emit this — that
+/// path is a manual edit and rides the existing MetadataUpdated event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DescriptionGenerated {
+    pub event_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub video_record_id: Uuid,
+    pub source: DescriptionSource,
+    /// Show Notes doc the text was derived from, when applicable.
+    pub source_doc_id: Option<String>,
+    pub source_prompt_version: Option<u32>,
+    /// Length of the stored text. The text itself stays off the event —
+    /// descriptions run to 5000 chars and the log is a ring buffer.
+    pub length: usize,
+    pub generated_by: Uuid,
+    pub generated_at: DateTime<Utc>,
+}
+
+/// Emitted when an operator toggles the description lock. `locked =
+/// false` means the regen-skip flag was just cleared.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DescriptionLocked {
+    pub event_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub video_record_id: Uuid,
+    pub locked: bool,
+    pub actor: Uuid,
 }
 
 /// ADR-046 — emitted when an operator toggles the summary lock. `locked

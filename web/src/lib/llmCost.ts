@@ -46,6 +46,42 @@ export function estimatePerRecordCost(transcriptChars: number, model: string, ch
        + (EXPECTED_OUTPUT_TOKENS / 1_000_000) * rate.outputPerMTok;
 }
 
+/**
+ * ADR-067 — the description rewrite's default model. Flash rather than
+ * Pro because the input is already-curated Show Notes, not a raw
+ * transcript. Mirrors DEFAULT_MODEL in the from-show-notes route.
+ */
+export const DESCRIPTION_MODEL = "google/gemini-2.5-flash";
+
+/**
+ * Typical flattened Show Notes doc — the input to the description
+ * rewrite. Real docs run ~2k–20k chars; this sits mid-band. Unlike the
+ * summary estimate we can't measure the true input without fetching the
+ * doc, and the preview isn't worth a fetch per record.
+ */
+const TYPICAL_SHOW_NOTES_CHARS = 8000;
+
+/** The ADR-067 prompt caps output at 4800 chars ≈ 1400 tokens. */
+const EXPECTED_DESCRIPTION_OUTPUT_TOKENS = 1400;
+
+/**
+ * Estimated $ to rewrite one record's Show Notes into a description.
+ *
+ * `withFullVariant` doubles it: the ADR-074 un-capped long form re-runs
+ * the same rewrite with `no_cap`, so a record that writes both pays
+ * twice.
+ */
+export function estimateDescriptionCost(
+  model: string = DESCRIPTION_MODEL,
+  opts?: { withFullVariant?: boolean },
+): number {
+  const rate = getModelRate(model);
+  const perCall =
+    (estimateTokens(TYPICAL_SHOW_NOTES_CHARS) / 1_000_000) * rate.inputPerMTok +
+    (EXPECTED_DESCRIPTION_OUTPUT_TOKENS / 1_000_000) * rate.outputPerMTok;
+  return opts?.withFullVariant ? perCall * 2 : perCall;
+}
+
 /** Aggregate cost over many records — used for the bulk-regen preview. */
 export function estimateBatchCost(items: Array<{ transcript_chars: number; chat_chars?: number }>, model: string): number {
   return items.reduce((sum, item) => sum + estimatePerRecordCost(item.transcript_chars, model, item.chat_chars ?? 0), 0);

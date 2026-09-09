@@ -33,9 +33,8 @@ import { ingestYouTubeSourceRow } from "../lib/youtubeIngest";
 import { resolveTranscriptForOperation } from "../lib/transcriptProvenance";
 import { resolveAlignedTitle, resolveAlignedTitleForced, resolveDiscordChannel } from "../lib/youtubeTitleAlign";
 import { getSeriesRegistry, getSeriesRegistryCached } from "../lib/seriesRegistryClient";
-import { sliceTranscriptFromSeconds, sliceTranscriptToSeconds } from "../lib/transcriptSlice";
 import { getDescriptionConfigCached } from "../lib/descriptionConfig";
-import { showNotesToDescription } from "../lib/showNotesToDescription";
+import { ensureDescription } from "../lib/descriptionGenerate";
 import { formatDateHover } from "../lib/dateHover";
 import { resolveContributingAccount } from "../lib/contributingAccount";
 import { resolveDestinations, destinationLabel, isAutomatedDestination, appliesDeclaredVisibility, withPreviewVisibilityOverride } from "../lib/destinationResolver";
@@ -1685,116 +1684,34 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
     }
   }
 
+  /**
+   * The per-card Copy / Regenerate button. The policy itself lives in
+   * `lib/descriptionGenerate.ts` so an unattended pass can run the same
+   * pipeline; this wrapper only supplies the UI states around it.
+   *
+   * `force: true` — a click is an explicit instruction, so it bypasses
+   * the locked / manual / already-current guards that stop a sweep from
+   * overwriting curated text.
+   */
   async function generateDescriptionFromTranscript() {
     setGeneratingDescription(true);
     setDescriptionError(null);
     setStatusMessage("Regenerating description…");
     try {
-      const cfg = getDescriptionConfigCached();
-      const hasShowNotes = !!video.summary_doc_id;
-
-      // Mode "copy_show_notes" + Show Notes exists → LLM-rewrite the
-      // Show Notes markdown into a YouTube-facing description using
-      // the admin-configured `show_notes_prompt` (marketing hook +
-      // chapter cues + optional highlights, ≤ 4800 chars). Falls back
-      // to the deterministic showNotesToDescription() converter if
-      // the LLM call fails.
-      if (cfg.mode === "copy_show_notes" && hasShowNotes) {
-        const readRes = await fetch(`/api/summary/read?docId=${encodeURIComponent(video.summary_doc_id!)}`);
-        if (!readRes.ok) throw new Error(`Show Notes read failed (${readRes.status})`);
-        const md = await readRes.text();
-        let description = "";
-        let source: "llm" | "deterministic_fallback" = "llm";
-        try {
-          const llmRes = await fetch("/api/description/from-show-notes", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ show_notes: md }),
-          });
-          const llmData = await llmRes.json().catch(() => ({}));
-          if (!llmRes.ok) throw new Error((llmData as { error?: string }).error ?? `LLM call failed (${llmRes.status})`);
-          description = (llmData as { text?: string }).text?.trim() ?? "";
-          if (!description || description.length < 20) throw new Error("LLM returned empty description");
-        } catch (err) {
-          onEvent(`DescriptionCopiedFallback: "${video.title}"${dateTag(video.recorded_at)} — LLM path failed (${err instanceof Error ? err.message : String(err)}); using deterministic converter`, { video_id: video.id });
-          description = showNotesToDescription(md);
-          source = "deterministic_fallback";
-          if (!description || description.length < 20) throw new Error("Both LLM and deterministic conversion failed");
-        }
-        videoStore.mutate(video.id, (r) =>
-          r.update_metadata(cmd({ edits: { description } })),
-        );
-        // ADR-074 follow-up — also write the un-capped variant so
-        // consumers that don't have to squeeze into YouTube's 5000
-        // chars (chapter site, Discord digest, MCP clients) get the
-        // long form. Same SHAPE as the shipped description (opening
-        // hook + chapter cues + highlights) — reruns the same LLM
-        // path with no_cap=true. Falls back to the deterministic
-        // strip only if the LLM call fails. Fire-and-forget; the
-        // shipped user-visible `description` is unaffected.
-        void (async () => {
-          try {
-            let fullText = "";
-            try {
-              const llmRes = await fetch("/api/description/from-show-notes", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ show_notes: md, no_cap: true }),
-              });
-              if (llmRes.ok) {
-                const j = await llmRes.json();
-                fullText = (j as { text?: string }).text?.trim() ?? "";
-              }
-            } catch { /* fall through to deterministic */ }
-            if (fullText.length < 20) fullText = showNotesToDescription(md, { noCap: true });
-            if (fullText.length < 20) return;
-            await fetch(`/api/artifacts/${encodeURIComponent(video.id)}/description-full`, {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                content: fullText,
-                title: video.title,
-                source_platform: video.source_platform,
-                source_id: video.source_id,
-                recorded_at: video.recorded_at ?? video.indexed_at ?? new Date().toISOString(),
-              }),
-            });
-          } catch { /* non-fatal — the shipped description is unaffected */ }
-        })();
-        onEvent(`DescriptionCopied: "${video.title}"${dateTag(video.recorded_at)} (${description.length} chars) — from Show Notes via ${source}`, { video_id: video.id });
-        setStatusMessage(`Description copied from Show Notes (${description.length} characters).`);
-        onMutated();
+      const result = await ensureDescription(video, {
+        actorState,
+        force: true,
+        onEvent,
+      });
+      if (!result.generated) {
+        setDescriptionError(`Nothing to do (${result.reason}).`);
         return;
       }
-
-      // Mode "generate", or "copy_show_notes" fallback when Show
-      // Notes are missing. Same LLM path as before with the ADR-060
-      // trim applied first; prompt comes from server config.
-      if (!video.transcript_text || video.transcript_text.length < 200) {
-        setDescriptionError(cfg.mode === "copy_show_notes"
-          ? "No Show Notes on Drive and no transcript to fall back on."
-          : "Transcript is too short or missing.");
-        return;
-      }
-      const rules = loadProcessingRules();
-      const attrs = applyProcessingRules(rules, video, getSeriesRegistryCached());
-      const trimStart = Math.max(0, Math.floor(attrs.trim_start_seconds ?? 0));
-      const trimEnd = Math.max(0, Math.floor(attrs.trim_end_seconds ?? 0));
-      const duration = video.duration_seconds || 0;
-      let transcript = video.transcript_text;
-      if (trimStart > 0) transcript = sliceTranscriptFromSeconds(transcript, trimStart);
-      if (trimEnd > 0 && duration > trimEnd) {
-        transcript = sliceTranscriptToSeconds(transcript, duration - trimEnd);
-      }
-      const finalTranscript = transcript.length >= 200 ? transcript : video.transcript_text;
-      const result = await requestLlmSummary(finalTranscript);
-      const description = result.summary?.trim();
-      if (!description) throw new Error("LLM returned no summary text");
-      videoStore.mutate(video.id, (r) =>
-        r.update_metadata(cmd({ edits: { description } })),
+      setStatusMessage(
+        result.source === "Transcript"
+          ? `Description regenerated (${result.length} characters).`
+          : `Description copied from Show Notes (${result.length} characters).`,
       );
-      onEvent(`DescriptionGenerated: "${video.title}"${dateTag(video.recorded_at)} (${description.length} chars) — from transcript${cfg.mode === "copy_show_notes" ? " (Show Notes fallback)" : ""}`, { video_id: video.id });
-      setStatusMessage(`Description regenerated (${description.length} characters).`);
       onMutated();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -330,6 +330,38 @@ pub struct SummaryCounts {
     pub c: u32,
 }
 
+/// Which pipeline authored the record's current `description`.
+///
+/// The description field long predates any provenance tracking, so this
+/// is `Option` on the record and absent for every record written before
+/// the field existed. Absent means "unknown, assume hand-curated" —
+/// automated passes must not overwrite what they cannot account for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DescriptionSource {
+    /// ADR-067 — LLM rewrite of the Show Notes doc into a YouTube-facing
+    /// description (marketing hook + chapter cues).
+    ShowNotesLlm,
+    /// ADR-064 §2 — deterministic markdown→plain-text conversion of the
+    /// Show Notes. The safety net when the LLM path fails.
+    ShowNotesDeterministic,
+    /// ADR-064 `generate` mode — LLM one-shot over the transcript, for
+    /// records with no Show Notes to derive from.
+    Transcript,
+    /// A human typed it, or it arrived verbatim from the source platform
+    /// at ingest. Either way no generator owns it, so regeneration would
+    /// destroy content nothing else can reproduce.
+    Manual,
+}
+
+impl DescriptionSource {
+    /// Whether an automated pass may overwrite a description from this
+    /// source without an explicit operator override. Manual descriptions
+    /// are the operator's; generated ones are ours to refresh.
+    pub fn is_regenerable(&self) -> bool {
+        !matches!(self, DescriptionSource::Manual)
+    }
+}
+
 /// Identity of the user performing a command, used for authorization checks.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Actor {

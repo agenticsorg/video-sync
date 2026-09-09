@@ -5,8 +5,10 @@
  *
  * One-click batch action that walks records most-recent-backwards and
  * advances each through the pipeline stages the orchestrator covers
- * (currently: hydrate Kaltura captions, auto-link high-confidence
- * siblings, ensure summary). Auto-publish is deferred to a follow-up.
+ * (hydrate Kaltura captions, auto-link high-confidence siblings, ensure
+ * summary, ensure description). The two generative stages run only for
+ * records in active consideration — InScope or Approved. Auto-publish is
+ * deferred to a follow-up.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -14,8 +16,10 @@ import { useRouter } from "next/navigation";
 import type { VideoRecordJSON } from "../lib/wasm";
 import { videoStore } from "../lib/store";
 import { useCurrentActor, actorCommand } from "../lib/useCurrentActor";
-import { formatUsd, estimatePerRecordCost } from "../lib/llmCost";
-import { runCatchUp, runBroadcastPairMigration, type OrchestratorEvent, type StageId, type StageStatus, AUTO_LINK_THRESHOLD, type MigrationProgressEvent } from "../lib/catchupOrchestrator";
+import { formatUsd, estimatePerRecordCost, estimateDescriptionCost, DESCRIPTION_MODEL } from "../lib/llmCost";
+import { runCatchUp, runBroadcastPairMigration, isInActiveConsideration, type OrchestratorEvent, type StageId, type StageStatus, AUTO_LINK_THRESHOLD, type MigrationProgressEvent } from "../lib/catchupOrchestrator";
+import { findRecordsNeedingDescription } from "../lib/descriptionGenerate";
+import { getDescriptionConfigCached } from "../lib/descriptionConfig";
 import { runYouTubeRowBackfill, findMissingYouTubeRows, type BackfillProgressEvent } from "../lib/youtubeIngest";
 import { runSummaryBadgeBackfill, findRecordsNeedingSummaryBadge, type BackfillProgressEvent as SummaryBackfillEvent } from "../lib/summaryBadgeBackfill";
 import { getCurrentPromptVersion } from "../lib/summaryPromptClient";
@@ -55,7 +59,16 @@ const STAGE_LABEL: Record<StageId, string> = {
   hydrate_transcript: "transcript",
   link_siblings: "siblings",
   ensure_summary: "summary",
+  ensure_description: "description",
 };
+
+/** Stage chips, in pipeline order. */
+const STAGE_ORDER: StageId[] = [
+  "hydrate_transcript",
+  "link_siblings",
+  "ensure_summary",
+  "ensure_description",
+];
 
 const STATUS_ICON: Record<StageStatus, string> = {
   done: "✓",
@@ -100,12 +113,31 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
       .slice(0, Math.max(1, maxRecords));
   }, [videos, maxRecords]);
 
+  // The generative stages skip anything outside active consideration,
+  // so both estimates below are drawn from this narrower set — the
+  // preview matches what the run will actually spend.
+  const considered = useMemo(
+    () => eligible.filter(isInActiveConsideration),
+    [eligible],
+  );
+  const consideredCount = considered.length;
+
   const summaryCostEstimate = useMemo(() => {
     // Rough preview: sum est cost over records that *would* need a summary.
-    return eligible
+    return considered
       .filter(v => (v.transcript_text?.length ?? 0) >= 200 && !v.summary_locked && !v.summary_doc_id)
       .reduce((s, v) => s + estimatePerRecordCost(v.transcript_text?.length ?? 0, "google/gemini-2.5-pro"), 0);
-  }, [eligible]);
+  }, [considered]);
+
+  const descriptionCostEstimate = useMemo(() => {
+    // Same shape, over records the description guard would let through.
+    // Mode comes from the cached config; the sweep re-reads it at run
+    // time, so a preview taken before the warm-up resolves is an
+    // estimate of the default mode rather than a promise.
+    const mode = getDescriptionConfigCached().mode;
+    return findRecordsNeedingDescription(considered, mode).length
+      * estimateDescriptionCost(DESCRIPTION_MODEL, { withFullVariant: true });
+  }, [considered]);
 
   // ADR-049 slice 5 — migration state. Distinct from the catch-up
   // RunState since this is a one-shot maintenance pass with different
@@ -577,7 +609,7 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
       return { level: "info", text: `▶ (${ev.index + 1}/${ev.total}) ${ev.title}` };
     }
     if (ev.type === "stage") {
-      const stageName = ev.stage === "hydrate_transcript" ? "transcript" : ev.stage === "link_siblings" ? "siblings" : "summary";
+      const stageName = STAGE_LABEL[ev.stage] ?? ev.stage;
       const prefix = ev.status === "done" ? "✓"
         : ev.status === "failed" ? "✗"
         : ev.status === "needs_review" ? "?"
@@ -751,8 +783,10 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
 
         <div style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: 12 }}>
           Walks records most-recent-backwards and advances each through the pipeline.
-          MVP stages: hydrate Kaltura captions · auto-link siblings (≥ {AUTO_LINK_THRESHOLD.toFixed(2)} score) · ensure summary
-          (skips locked + current-prompt). Auto-publish is deferred — when this run finishes, the bottom of the panel
+          Stages: hydrate Kaltura captions · auto-link siblings (≥ {AUTO_LINK_THRESHOLD.toFixed(2)} score) · ensure summary
+          (skips locked + current-prompt) · ensure description (skips locked, hand-written and already-current text).
+          The last two run only for records <strong>InScope or Approved</strong> — the sweep spends no LLM budget on
+          anything nobody has scoped in. Auto-publish is deferred — when this run finishes, the bottom of the panel
           tells you which records are ready for you to click Publish on.
         </div>
 
@@ -783,7 +817,9 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
             />
           </label>
           <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
-            Will walk <strong>{eligible.length}</strong> record{eligible.length === 1 ? "" : "s"} (most recent first) · est. summary cost <strong>{formatUsd(summaryCostEstimate)}</strong>
+            Will walk <strong>{eligible.length}</strong> record{eligible.length === 1 ? "" : "s"} (most recent first),
+            of which <strong>{consideredCount}</strong> {consideredCount === 1 ? "is" : "are"} in active consideration
+            {" "}· est. cost <strong>{formatUsd(summaryCostEstimate + descriptionCostEstimate)}</strong>
           </div>
           {runState === "running" ? (
             <button className="btn btn-sm btn-red" onClick={cancel}>Cancel</button>
@@ -810,7 +846,7 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
                   <span style={{ flex: "1 1 240px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {row.title}
                   </span>
-                  {(["hydrate_transcript", "link_siblings", "ensure_summary"] as StageId[]).map(stage => {
+                  {STAGE_ORDER.map(stage => {
                     const s = row.stages[stage];
                     return (
                       <span

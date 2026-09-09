@@ -1546,3 +1546,277 @@ fn test_a_record_stored_without_the_field_deserialises() {
     assert!(restored.destination_outcomes.is_empty());
     rec.destination_outcomes.clear();
 }
+
+// ── Description provenance ───────────────────────────────
+
+fn set_desc(
+    source: DescriptionSource,
+    doc_id: Option<&str>,
+    prompt_version: Option<u32>,
+) -> SetDescriptionMetadata {
+    SetDescriptionMetadata {
+        actor: admin_actor(),
+        text: "A description long enough to be real.".to_string(),
+        source,
+        source_doc_id: doc_id.map(|s| s.to_string()),
+        source_prompt_version: prompt_version,
+        generated_at: None,
+    }
+}
+
+fn summary_at(doc_id: &str, prompt_version: u32) -> SetSummaryMetadata {
+    SetSummaryMetadata {
+        actor: admin_actor(),
+        doc_id: doc_id.to_string(),
+        prompt_version,
+        counts: SummaryCounts { m: 1, l: 1, t: 1, c: 0 },
+        generated_at: None,
+    }
+}
+
+#[test]
+fn test_set_description_metadata_stores_text_and_provenance() {
+    let mut rec = approved_record();
+    let events = rec
+        .set_description_metadata(set_desc(DescriptionSource::ShowNotesLlm, Some("doc-1"), Some(3)))
+        .unwrap();
+
+    assert_eq!(rec.description.as_deref(), Some("A description long enough to be real."));
+    assert_eq!(rec.description_source, Some(DescriptionSource::ShowNotesLlm));
+    assert_eq!(rec.description_source_doc_id.as_deref(), Some("doc-1"));
+    assert_eq!(rec.description_source_prompt_version, Some(3));
+    assert!(rec.description_generated_at.is_some());
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], CatalogEvent::DescriptionGenerated(_)));
+}
+
+#[test]
+fn test_set_description_metadata_requires_curate_rights() {
+    let mut rec = approved_record();
+    let mut cmd = set_desc(DescriptionSource::Transcript, None, None);
+    cmd.actor = viewer_actor();
+
+    assert!(matches!(
+        rec.set_description_metadata(cmd),
+        Err(CatalogError::Unauthorized)
+    ));
+}
+
+#[test]
+fn test_metadata_edit_marks_the_description_manual() {
+    // The whole point of the Manual stamp: an operator typing in the
+    // description box must not leave text an automated pass will treat
+    // as its own and overwrite.
+    let mut rec = approved_record();
+    rec.set_description_metadata(set_desc(DescriptionSource::ShowNotesLlm, Some("doc-1"), Some(3)))
+        .unwrap();
+    assert!(rec.description_is_regenerable());
+
+    rec.update_metadata(UpdateMetadata {
+        actor: admin_actor(),
+        edits: MetadataEdits {
+            description: Some("Hand-written by a curator.".to_string()),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    assert_eq!(rec.description_source, Some(DescriptionSource::Manual));
+    assert_eq!(rec.description_source_doc_id, None);
+    assert_eq!(rec.description_source_prompt_version, None);
+    assert_eq!(rec.description_generated_at, None);
+    assert!(!rec.description_is_regenerable());
+}
+
+#[test]
+fn test_ingest_description_starts_manual() {
+    // make_index_cmd supplies a description, so it came from the source
+    // platform and nothing may overwrite it unasked.
+    let (rec, _) = VideoRecord::index(make_index_cmd());
+    assert_eq!(rec.description_source, Some(DescriptionSource::Manual));
+    assert!(!rec.description_is_regenerable());
+}
+
+#[test]
+fn test_index_without_a_description_has_no_source() {
+    let mut cmd = make_index_cmd();
+    cmd.description = None;
+    let (rec, _) = VideoRecord::index(cmd);
+
+    assert_eq!(rec.description_source, None);
+    // Nothing to protect — an empty description is free to generate.
+    assert!(rec.description_is_regenerable());
+}
+
+#[test]
+fn test_unknown_provenance_is_not_regenerable() {
+    // Every record written before these fields existed loads with
+    // description_source: None and a non-empty description. That must
+    // read as "leave it alone", not "free to overwrite".
+    let mut rec = approved_record();
+    rec.description = Some("Written before provenance existed.".to_string());
+    rec.description_source = None;
+
+    assert!(!rec.description_is_regenerable());
+}
+
+#[test]
+fn test_lock_blocks_regeneration_and_unlock_restores_it() {
+    let mut rec = approved_record();
+    rec.set_description_metadata(set_desc(DescriptionSource::ShowNotesLlm, Some("doc-1"), Some(3)))
+        .unwrap();
+    assert!(rec.description_is_regenerable());
+
+    let events = rec.lock_description(LockDescription { actor: admin_actor() }).unwrap();
+    assert!(rec.description_locked);
+    assert!(!rec.description_is_regenerable());
+    assert!(matches!(events[0], CatalogEvent::DescriptionLocked(_)));
+
+    rec.unlock_description(UnlockDescription { actor: admin_actor() }).unwrap();
+    assert!(!rec.description_locked);
+    assert!(rec.description_is_regenerable());
+}
+
+#[test]
+fn test_lock_description_requires_curate_rights() {
+    let mut rec = approved_record();
+    assert!(matches!(
+        rec.lock_description(LockDescription { actor: viewer_actor() }),
+        Err(CatalogError::Unauthorized)
+    ));
+}
+
+#[test]
+fn test_description_goes_stale_when_show_notes_are_regenerated() {
+    let mut rec = approved_record();
+    rec.set_summary_metadata(summary_at("doc-1", 3)).unwrap();
+    rec.set_description_metadata(set_desc(DescriptionSource::ShowNotesLlm, Some("doc-1"), Some(3)))
+        .unwrap();
+    assert!(!rec.description_is_stale());
+
+    // Show Notes regenerated under a newer prompt — this is the drift
+    // ADR-064 accepted and left undetected.
+    rec.set_summary_metadata(summary_at("doc-1", 4)).unwrap();
+    assert!(rec.description_is_stale());
+}
+
+#[test]
+fn test_description_goes_stale_when_derived_from_a_different_doc() {
+    let mut rec = approved_record();
+    rec.set_summary_metadata(summary_at("doc-2", 3)).unwrap();
+    rec.set_description_metadata(set_desc(DescriptionSource::ShowNotesLlm, Some("doc-1"), Some(3)))
+        .unwrap();
+
+    assert!(rec.description_is_stale());
+}
+
+#[test]
+fn test_transcript_and_manual_descriptions_are_never_stale() {
+    // Neither has an upstream doc to drift from, so a Show Notes regen
+    // says nothing about them.
+    let mut rec = approved_record();
+    rec.set_summary_metadata(summary_at("doc-1", 3)).unwrap();
+    rec.set_description_metadata(set_desc(DescriptionSource::Transcript, None, None)).unwrap();
+    rec.set_summary_metadata(summary_at("doc-1", 9)).unwrap();
+    assert!(!rec.description_is_stale());
+
+    rec.update_metadata(UpdateMetadata {
+        actor: admin_actor(),
+        edits: MetadataEdits {
+            description: Some("Hand-written.".to_string()),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    assert!(!rec.description_is_stale());
+}
+
+#[test]
+fn test_deterministic_fallback_descriptions_track_staleness_too() {
+    let mut rec = approved_record();
+    rec.set_summary_metadata(summary_at("doc-1", 3)).unwrap();
+    rec.set_description_metadata(set_desc(
+        DescriptionSource::ShowNotesDeterministic,
+        Some("doc-1"),
+        Some(3),
+    ))
+    .unwrap();
+    assert!(!rec.description_is_stale());
+
+    rec.set_summary_metadata(summary_at("doc-1", 4)).unwrap();
+    assert!(rec.description_is_stale());
+}
+
+#[test]
+fn test_a_record_stored_without_description_provenance_deserialises() {
+    // serde(default) across all five fields is what stops every record
+    // already on disk from failing to load.
+    let mut rec = approved_record();
+    rec.set_description_metadata(set_desc(DescriptionSource::ShowNotesLlm, Some("doc-1"), Some(3)))
+        .unwrap();
+    let json = rec.to_json().unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let obj = value.as_object_mut().unwrap();
+    for field in [
+        "description_source",
+        "description_source_doc_id",
+        "description_source_prompt_version",
+        "description_generated_at",
+        "description_locked",
+    ] {
+        obj.remove(field).expect("field present before removal");
+    }
+    let stripped = serde_json::to_string(&value).unwrap();
+
+    let restored = VideoRecord::from_json(&stripped).unwrap();
+    assert_eq!(restored.description_source, None);
+    assert!(!restored.description_locked);
+    // The description survived, and unknown provenance protects it.
+    assert!(restored.description.is_some());
+    assert!(!restored.description_is_regenerable());
+}
+
+#[test]
+fn test_the_client_command_payload_deserialises() {
+    // The TS side hand-builds this JSON via actorCommand(); nothing in
+    // either test suite crosses that boundary, so pin the shape here.
+    // `email` is present on the client actor and absent on the Rust one
+    // — serde must ignore it rather than fail the whole command.
+    let json = r#"{
+        "user_id": "00000000-0000-0000-0000-000000000001",
+        "role": "Admin",
+        "email": "curator@agentics.org",
+        "text": "Generated description text.",
+        "source": "ShowNotesLlm",
+        "source_doc_id": "doc-1",
+        "source_prompt_version": 3,
+        "generated_at": "2026-09-09T12:00:00Z"
+    }"#;
+    // The actor is flattened into the same object on the client, so the
+    // command struct sees it as a sibling of the other fields — which is
+    // how every other command in this file is already shaped.
+    let value: serde_json::Value = serde_json::from_str(json).unwrap();
+    let actor: Actor = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(actor.role, UserRole::Admin);
+
+    let source: DescriptionSource =
+        serde_json::from_value(value.get("source").unwrap().clone()).unwrap();
+    assert_eq!(source, DescriptionSource::ShowNotesLlm);
+}
+
+#[test]
+fn test_every_description_source_round_trips_as_a_bare_string() {
+    // The TS DescriptionSourceJSON union is these four literals. A
+    // rename on either side must break a test, not a deploy.
+    for (variant, expected) in [
+        (DescriptionSource::ShowNotesLlm, "\"ShowNotesLlm\""),
+        (DescriptionSource::ShowNotesDeterministic, "\"ShowNotesDeterministic\""),
+        (DescriptionSource::Transcript, "\"Transcript\""),
+        (DescriptionSource::Manual, "\"Manual\""),
+    ] {
+        let json = serde_json::to_string(&variant).unwrap();
+        assert_eq!(json, expected);
+        let back: DescriptionSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, variant);
+    }
+}

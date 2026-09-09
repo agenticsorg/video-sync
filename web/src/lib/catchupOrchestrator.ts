@@ -7,11 +7,19 @@
  * one through a fixed pipeline of stages. Yields per-stage progress
  * events so the panel can render a live unified view.
  *
- * MVP scope (slice 1):
+ * Stages:
  *   - hydrate_transcript  (Kaltura captions for entries with none)
  *   - link_siblings       (auto-link ≥ AUTO_LINK_THRESHOLD)
  *   - ensure_summary      (ADR-046: skip if locked, current, or no
  *                           transcript; honor cost cap)
+ *   - ensure_description  (ADR-064/067: derive from the Show Notes the
+ *                           stage above just ensured, else from the
+ *                           transcript; skip locked / hand-written /
+ *                           unknown-provenance text)
+ *
+ * The two generative stages run only for records in active
+ * consideration (see ACTIVE_CONSIDERATION_STATUSES); the two cheap ones
+ * run for every record in the window.
  *
  * Deferred to slice 2:
  *   - source fetch        (operator still uses ImportPanel)
@@ -30,7 +38,8 @@ import { videoStore } from "./store";
 import { actorCommand } from "./useCurrentActor";
 import { rankSiblingCandidates } from "./siblingMatcher";
 import { getCurrentPromptVersion } from "./summaryPromptClient";
-import { estimatePerRecordCost } from "./llmCost";
+import { estimatePerRecordCost, estimateDescriptionCost, DESCRIPTION_MODEL } from "./llmCost";
+import { ensureDescription } from "./descriptionGenerate";
 import { getDisplayTitle, loadProcessingRules, applyProcessingRules } from "./processingRules";
 import { resolveTranscriptForOperation } from "./transcriptProvenance";
 
@@ -187,7 +196,33 @@ export const STAGE_FOR_REVIEW_THRESHOLD = 0.6;  // surfaced via existing banner;
 export type StageId =
   | "hydrate_transcript"
   | "link_siblings"
-  | "ensure_summary";
+  | "ensure_summary"
+  | "ensure_description";
+
+/**
+ * The curation states that put a record "in active consideration": a
+ * rule or an operator has scoped it in, and nobody has skipped,
+ * abandoned or already shipped it.
+ *
+ * This gates the two stages that spend LLM budget. The cheap stages
+ * (transcript hydration, sibling linking) still run for every record in
+ * the window — they cost nothing, and linking a sibling early is often
+ * what makes a record publishable in the first place.
+ *
+ * `Published` is deliberately outside the gate. A shipped record's Show
+ * Notes can still be refreshed on a prompt bump, but that is the Summary
+ * Badge Backfill's job (ADR-052), which walks the whole catalog; the
+ * sweep's budget belongs to work that is still moving.
+ */
+export const ACTIVE_CONSIDERATION_STATUSES: ReadonlySet<string> = new Set([
+  "InScope",
+  "Approved",
+]);
+
+/** Whether the generative stages may spend budget on this record. */
+export function isInActiveConsideration(record: VideoRecordJSON): boolean {
+  return ACTIVE_CONSIDERATION_STATUSES.has(record.status);
+}
 
 export type StageStatus = "done" | "skipped" | "n/a" | "failed" | "needs_review";
 
@@ -518,8 +553,29 @@ export async function runCatchUp(opts: CatchupOptions, actorState: Parameters<ty
       onEvent({ type: "stage", record_id: fresh.id, stage: "link_siblings", status: "n/a", note: "no candidate above review threshold" });
     }
 
-    // Stage: ensure_summary ─────────────────────────────────────
+    // Gate: active consideration ────────────────────────────────
+    // Everything below this line spends money. A record nobody has
+    // scoped in gets both generative stages reported as skipped —
+    // visible in the panel rather than silently absent, so "why didn't
+    // this advance?" stays answerable.
     const afterLink = videoStore.getAll().find(v => v.id === sorted[i].id) ?? fresh;
+    if (!isInActiveConsideration(afterLink)) {
+      const note = `not in active consideration (${afterLink.status})`;
+      onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_summary", status: "skipped", note });
+      onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_description", status: "skipped", note });
+      if (anyStageDone) tagRecord(afterLink.id, afterLink.tags ?? []);
+      processed++;
+      // Kept as a call rather than a literal `false` so this path can't
+      // drift from the end-of-record one if either definition changes.
+      // It is false today: isPublishable requires Approved, which is
+      // inside the gate.
+      const gatedPublishable = isPublishable(afterLink);
+      if (gatedPublishable) readyToPublish++;
+      onEvent({ type: "record_end", record_id: fresh.id, publishable: gatedPublishable });
+      continue;
+    }
+
+    // Stage: ensure_summary ─────────────────────────────────────
     const estCost = estimatePerRecordCost(afterLink.transcript_text?.length ?? 0, "google/gemini-2.5-pro");
     if (costSpent + estCost > costCapUsd) {
       onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_summary", status: "skipped", note: `would exceed cost cap (est. ${estCost.toFixed(2)}, spent ${costSpent.toFixed(2)}, cap ${costCapUsd.toFixed(2)})` });
@@ -547,6 +603,41 @@ export async function runCatchUp(opts: CatchupOptions, actorState: Parameters<ty
       if (signal.aborted) { onEvent({ type: "cancelled", processed, job_id: jobId, job_tag: jobTag, tagged_count: taggedCount }); return; }
       onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_summary", status: "failed", note: err instanceof Error ? err.message : String(err) });
       log?.(`Catch-up · summary failed: "${displayTitle}" — ${err instanceof Error ? err.message : String(err)}`, { video_id: fresh.id });
+    }
+
+    // Stage: ensure_description ─────────────────────────────────
+    // Runs after the summary deliberately: in `copy_show_notes` mode
+    // the description is derived FROM the Show Notes, so a record that
+    // just got its first summary can produce a description in the same
+    // pass rather than waiting for the next sweep.
+    //
+    // No `force` — this is an unattended pass, so the guard in
+    // ensureDescription protects locked, hand-written and
+    // unknown-provenance text.
+    const afterSummary = videoStore.getAll().find(v => v.id === sorted[i].id) ?? fresh;
+    const descCost = estimateDescriptionCost(DESCRIPTION_MODEL, { withFullVariant: true });
+    if (costSpent + descCost > costCapUsd) {
+      onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_description", status: "skipped", note: `would exceed cost cap (est. ${descCost.toFixed(2)}, spent ${costSpent.toFixed(2)}, cap ${costCapUsd.toFixed(2)})` });
+      costCapHit = true;
+    } else {
+      try {
+        const result = await ensureDescription(afterSummary, { actorState, signal, onEvent: log });
+        if (result.generated) {
+          costSpent += descCost;
+          anyStageDone = true;
+          const via = result.usedFallback ? "deterministic fallback" : "llm";
+          onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_description", status: "done", note: `${result.length} chars via ${via}` });
+          log?.(`Catch-up · described: "${displayTitle}" (${result.length} chars via ${via})`, { video_id: fresh.id });
+        } else {
+          // "current" is a clean no-op; the rest mean we deliberately
+          // kept our hands off someone else's text.
+          onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_description", status: result.reason === "current" ? "skipped" : "n/a", note: result.reason });
+        }
+      } catch (err) {
+        if (signal.aborted) { onEvent({ type: "cancelled", processed, job_id: jobId, job_tag: jobTag, tagged_count: taggedCount }); return; }
+        onEvent({ type: "stage", record_id: fresh.id, stage: "ensure_description", status: "failed", note: err instanceof Error ? err.message : String(err) });
+        log?.(`Catch-up · description failed: "${displayTitle}" — ${err instanceof Error ? err.message : String(err)}`, { video_id: fresh.id });
+      }
     }
 
     // End-of-record

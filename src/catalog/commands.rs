@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::catalog::events::MetadataEdits;
-use crate::catalog::value_objects::{Actor, DerivationType, LinkOrigin, LocationRole, Platform, SourcePlatform, SummaryCounts};
+use crate::catalog::value_objects::{Actor, DerivationType, DescriptionSource, LinkOrigin, LocationRole, Platform, SourcePlatform, SummaryCounts};
 
 /// Commands accepted by the VideoRecord aggregate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,5 +250,44 @@ pub struct LockSummary {
 /// bulk-regen pool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnlockSummary {
+    pub actor: Actor,
+}
+
+/// Set the description text and its provenance in one command.
+///
+/// Distinct from `update_metadata { edits: { description } }`, which
+/// still works and now stamps the description `Manual`. Generators use
+/// this command so the record can later answer "who wrote this, from
+/// what, and is it still current?".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetDescriptionMetadata {
+    pub actor: Actor,
+    /// The description text to store.
+    pub text: String,
+    /// Which pipeline produced it.
+    pub source: DescriptionSource,
+    /// Drive file id of the Show Notes doc it was derived from, for the
+    /// two Show-Notes-derived sources. `None` for transcript mode.
+    #[serde(default)]
+    pub source_doc_id: Option<String>,
+    /// The record's `summary_prompt_version` at derivation time.
+    #[serde(default)]
+    pub source_prompt_version: Option<u32>,
+    /// ISO timestamp from the generation flow; falls back to now().
+    #[serde(default)]
+    pub generated_at: Option<String>,
+}
+
+/// Lock the description against automated regeneration. The text stays
+/// editable by hand; the flag only affects unattended passes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockDescription {
+    pub actor: Actor,
+}
+
+/// Opposite of LockDescription. Returns the record to the pool of
+/// descriptions an automated pass may refresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnlockDescription {
     pub actor: Actor,
 }
