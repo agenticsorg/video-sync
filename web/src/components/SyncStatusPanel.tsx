@@ -18,6 +18,14 @@ const YT_KEY = "video-sync:sync-status-youtube";
 const KAL_KEY = "video-sync:sync-status-kaltura";
 const PRIV_KEY = "video-sync:sync-status-privacy";
 
+/**
+ * Floor for the Overview tab's first month when no backfill profile is
+ * selected. The view starts here even on a catalog whose earliest record
+ * is more recent; anything older than this still pulls the start date
+ * back, so no recording falls off the rollup.
+ */
+const OVERVIEW_START_DATE = "2022-11-01";
+
 type PresenceFilter = "any" | "yes" | "no";
 type PrivacyFilter = "any" | "public" | "not_public";
 
@@ -117,19 +125,26 @@ export default function SyncStatusPanel({ videos, onNavigateToVideo }: Props) {
     try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
   }
 
-  // Derive an "All videos" profile from the actual data so the view works
-  // even when no backfill profile is configured.
+  // Synthesise an "All videos" profile so the view works even when no
+  // backfill profile is configured. The start date is OVERVIEW_START_DATE
+  // or the earliest recording, whichever is earlier — the constant gives
+  // the Overview a stable first month, and the earliest-recording arm
+  // keeps "All videos" honest if something older than it ever lands.
   const syntheticAll = useMemo<BackfillProfile>(() => {
     const earliest = videos
       .map(v => (v.recorded_at || v.indexed_at || "").slice(0, 10))
       .filter(Boolean)
-      .sort()[0] ?? new Date().toISOString().slice(0, 10);
+      .sort()[0];
+    // ISO dates sort lexicographically, so the smaller string is earlier.
+    const dateFrom = earliest && earliest < OVERVIEW_START_DATE
+      ? earliest
+      : OVERVIEW_START_DATE;
     return {
       id: "__all__",
       name: "All videos",
       enabled: true,
       source_platforms: [],
-      date_from: earliest,
+      date_from: dateFrom,
       criteria: { days_of_week: [0, 1, 2, 3, 4, 5, 6] },
       default_privacy: "unlisted",
       max_uploads_per_day: 0,
