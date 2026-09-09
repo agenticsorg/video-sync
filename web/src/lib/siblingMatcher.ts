@@ -188,13 +188,55 @@ function sameCalendarDay(a: string | null, b: string | null): boolean {
  * a small slack for DST transitions and Zoom-vs-Fireflies start/end
  * timestamp drift on long sessions, then round to a clean 30h.
  *
- * Beyond this, two recordings are on genuinely different days — even
- * perfect participant + title overlap shouldn't link them, because
- * recurring meetings (same hosts, same agenda template) would
- * false-positive every week. rankSiblingCandidates drops candidates
- * whose delta exceeds this gate before scoring.
+ * No longer the gate `rankSiblingCandidates` applies — 30 hours spans
+ * two calendar days, so it let genuinely different days' recordings
+ * through. MIDNIGHT_STRADDLE_MAX_DELTA_MIN and isSameEventDay took
+ * over that job and are strictly tighter. This constant now bounds
+ * only timeScore's residual tier, for diagnostic callers that score a
+ * pair without going through the gate.
  */
 export const MAX_PLAUSIBLE_TIME_DELTA_MIN = 30 * 60;
+
+/**
+ * How far apart two recordings may sit and still count as the same
+ * day's event when their timestamps land on different UTC calendar
+ * days.
+ *
+ * The 30-hour bound above is a *plausibility* bound, not a same-day
+ * one. It admits a Monday 09:00 recording as a sibling of a Tuesday
+ * 14:00 one — 29 hours apart, and different days' meetings by any
+ * reading. That is the false positive this constant closes.
+ *
+ * A flat "must share a UTC calendar day" rule would be wrong in the
+ * other direction: a call running 22:00–01:30 legitimately yields a
+ * Zoom start-time on one date and a Fireflies end-of-call on the next,
+ * 3.5 hours apart. Those are the same event and must still link.
+ *
+ * So a cross-day pair is admitted only when the gap is small enough
+ * that the midnight boundary explains it. Six hours covers
+ * start-vs-end drift on a long session with room to spare, while
+ * rejecting anything genuinely a day apart.
+ */
+export const MIDNIGHT_STRADDLE_MAX_DELTA_MIN = 6 * 60;
+
+/**
+ * Do these two timestamps describe the same day's event?
+ *
+ * True when they share a UTC calendar day, or when they straddle
+ * midnight closely enough to be one session. A null delta (either
+ * timestamp missing or unparseable) returns true: an absent date is
+ * not evidence of a *different* date, and the caller already
+ * redistributes scoring weight when the time signal is unavailable.
+ */
+export function isSameEventDay(
+  target: string | null,
+  candidate: string | null,
+  deltaMin: number | null,
+): boolean {
+  if (deltaMin === null) return true;
+  if (sameCalendarDay(target, candidate)) return true;
+  return deltaMin <= MIDNIGHT_STRADDLE_MAX_DELTA_MIN;
+}
 
 function timeScore(target: string | null, candidate: string | null, deltaMin: number | null): number {
   if (deltaMin == null) return 0;
@@ -240,12 +282,18 @@ export function rankSiblingCandidates(
     const participant_overlap = participantJaccard(target.participants ?? [], v.participants ?? []);
     const time_delta_minutes = timeDeltaMinutes(targetRecorded, candidateRecorded);
 
-    // Hard gate: a date gap exceeding the max plausible timezone
-    // difference is a strong NOT-match signal that should override
-    // participant + title overlap. Recurring meetings (same hosts,
-    // same agenda template, same Zoom room) would otherwise
-    // false-positive against every other instance of themselves.
-    if (time_delta_minutes !== null && time_delta_minutes > MAX_PLAUSIBLE_TIME_DELTA_MIN) {
+    // Hard gate: two recordings from different dates are never offered
+    // as siblings, whatever their participant + title overlap says.
+    // Recurring meetings (same hosts, same agenda template, same Zoom
+    // room) would otherwise false-positive against every other
+    // instance of themselves.
+    //
+    // Strictly tighter than MAX_PLAUSIBLE_TIME_DELTA_MIN, which this
+    // replaces at the gate: that bound admitted pairs up to 30 hours
+    // apart, which spans two calendar days. See isSameEventDay for the
+    // midnight-straddle allowance that keeps a single call's
+    // start-vs-end timestamps together across a date boundary.
+    if (!isSameEventDay(targetRecorded, candidateRecorded, time_delta_minutes)) {
       continue;
     }
 
