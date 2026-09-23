@@ -53,7 +53,7 @@ This directory contains the Architecture Decision Records for **video-sync** (a.
 | [ADR-045](ADR-045-redirect-unauthorized-to-wiki.md) | Wider IAP Gate + App-Level Redirect for Unauthorized Users | Accepted (implemented 2026-05-22; IAP binding applied 2026-05-27 — now fully live) |
 | [ADR-046](ADR-046-prompt-driven-summaries.md) | Prompt-Driven Video Summaries on Drive | Proposed |
 | [ADR-047](ADR-047-automated-catch-up.md) | Automated Catch-Up Action | Proposed |
-| [ADR-048](ADR-048-date-distance-gates-in-matchers.md) | Date-Distance Gates in Cross-Source Matchers | Accepted (implemented 2026-06-03; sibling gate amended 2026-09-09 — see Amendment below) |
+| [ADR-048](ADR-048-date-distance-gates-in-matchers.md) | Date-Distance Gates in Cross-Source Matchers | Accepted (implemented 2026-06-03; sibling gate superseded by the 2026-09-09 Addendum below) |
 | [ADR-049](ADR-049-livestream-provenance-zoom-to-youtube.md) | Live-stream Provenance — Zoom-to-YouTube Broadcasts | Proposed |
 | [ADR-050](ADR-050-fireflies-transcribed-from-zoom.md) | Fireflies as Downstream of the Meeting Source | Accepted (implemented 2026-06-07) |
 | [ADR-051](ADR-051-youtube-ingest-auto-published.md) | YouTube source rows from publish-trail ingest land at Published | Accepted (implemented 2026-06-07) |
@@ -83,6 +83,7 @@ This directory contains the Architecture Decision Records for **video-sync** (a.
 | [ADR-075](ADR-075-series-driven-destinations.md) | Series-Driven Destinations + Per-Platform Visibility | Accepted — Phase 2 MVP shipped 2026-08-11; Phase 1 (interim default flip) rejected in favour of Phase 2 |
 | [ADR-076](ADR-076-consumer-contract-agentics-catalog.md) | Consumer Contract — External Sites Reading the Show Notes Catalog | Proposed |
 | [ADR-077](ADR-077-first-class-publish-destinations.md) | First-Class Publish Destinations — Per-Destination Outcomes | Accepted — three decisions resolved 2026-08-23; §1, §2, §3 shipped; §5 Drive half shipped, Kaltura half blocked on the KMC access-control mapping |
+| [ADR-078](ADR-078-google-drive-folder-as-source.md) | Google Drive Folder as a Source | Proposed |
 
 ## ADR Format
 
