@@ -84,6 +84,7 @@ This directory contains the Architecture Decision Records for **video-sync** (a.
 | [ADR-076](ADR-076-consumer-contract-agentics-catalog.md) | Consumer Contract — External Sites Reading the Show Notes Catalog | Proposed |
 | [ADR-077](ADR-077-first-class-publish-destinations.md) | First-Class Publish Destinations — Per-Destination Outcomes | Accepted — three decisions resolved 2026-08-23; §1, §2, §3 shipped; §5 Drive half shipped, Kaltura half blocked on the KMC access-control mapping |
 | [ADR-078](ADR-078-google-drive-folder-as-source.md) | Google Drive Folder as a Source | Proposed |
+| [ADR-079](ADR-079-advance-to-published-pipeline.md) | Advance to Published — One Pipeline for Card, Bulk, and Agent | Proposed |
 
 ## ADR Format
 
