@@ -926,6 +926,25 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
           }
           if (outcome.status === "failed") {
             onEvent(`VideoPublishFailed: "${video.title}"${dateTag(video.recorded_at)} — ${label}: ${outcome.error}`, { video_id: video.id });
+            // Record the failure ON THE RECORD, not just in the event log.
+            //
+            // Incident 2026-09-23: this branch returned here. YouTube
+            // failed on an expired grant, Kaltura succeeded, and the
+            // record ended up with a single Pushed outcome — so
+            // is_fully_published() and missing_destinations(), which are
+            // both computed from destination_outcomes, saw nothing
+            // outstanding. The card left the review queue looking
+            // completely published while half of its declared
+            // destinations had never happened.
+            //
+            // A partial publish IS Published (ADR-077 §Decisions-resolved
+            // #1) and that stays true — but only a durable Failed outcome
+            // makes "Published with one destination outstanding"
+            // distinguishable from "Published everywhere".
+            recordDestinationFailure(
+              outcome.spec.platform as "YouTube" | "Kaltura" | "GoogleDrive",
+              outcome.error ?? "publish failed",
+            );
             return;
           }
 
@@ -1277,6 +1296,38 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
    * activity log distinguishes "published to Kaltura" from "Kaltura
    * destination attached".
    */
+  /**
+   * Record that a declared destination did NOT land.
+   *
+   * Deliberately not folded into recordDestinationOutcome: that one
+   * falls back to `add_location(role: "Destination")` when the aggregate
+   * rejects the command, which would be actively wrong here — a failed
+   * push must never leave a Destination location claiming the video is
+   * on that platform.
+   *
+   * The aggregate creates the outcome if the destination was never
+   * declared, so an ad-hoc target that fails is still recorded.
+   */
+  function recordDestinationFailure(
+    platform: "YouTube" | "Kaltura" | "GoogleDrive",
+    error: string,
+  ): void {
+    // record_destination_result is only legal from Publishing/Published.
+    if (video.status !== "Publishing" && video.status !== "Published") return;
+    try {
+      videoStore.mutate(video.id, (r) =>
+        r.recordDestinationResult(cmd({ platform, error })),
+      );
+    } catch (err) {
+      // Best-effort: the event-log line above is still written, and the
+      // publish flow must not abort because bookkeeping was refused.
+      onEvent(
+        `DestinationFailureUnrecorded: "${video.title}" — could not record ${platform} failure on the record: ${err instanceof Error ? err.message : String(err)}`,
+        { video_id: video.id },
+      );
+    }
+  }
+
   function recordDestinationOutcome(
     platform: "YouTube" | "Kaltura" | "GoogleDrive",
     externalId: string,
