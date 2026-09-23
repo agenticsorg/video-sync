@@ -84,6 +84,81 @@ export function detectFolderId(input: string): string | null {
   return null;
 }
 
+/**
+ * What kind of thing a pasted Drive URL points at.
+ *
+ * The Drive tab stacks two inputs — register-a-folder and
+ * paste-a-single-file — and a Drive link is valid for exactly one of
+ * them. Telling an operator "paste a folder link" when they have just
+ * pasted a perfectly good *file* link is technically true and useless:
+ * it describes what the field wants without acknowledging what they
+ * gave it, or where the thing they gave it belongs.
+ *
+ * `unknown` is the honest answer for `open?id=` and bare ids, which
+ * Drive uses for files and folders alike — the caller should try its
+ * own interpretation rather than guess on the operator's behalf.
+ */
+export type DriveLinkKind = "file" | "folder" | "google-doc" | "unknown";
+
+export interface DriveLinkGuess {
+  kind: DriveLinkKind;
+  /** The id, when the shape carried one. */
+  id: string | null;
+}
+
+export function classifyDriveLink(input: string): DriveLinkGuess {
+  const s = input.trim();
+  if (!s) return { kind: "unknown", id: null };
+
+  let m = s.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]{10,})/i);
+  if (m) return { kind: "file", id: m[1] };
+
+  m = s.match(/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/([A-Za-z0-9_-]{10,})/i);
+  if (m) return { kind: "folder", id: m[1] };
+
+  // Google-native docs are never videos (ADR-071 §1's mimeType guard
+  // rejects them downstream); naming them here fails faster and clearer.
+  m = s.match(/docs\.google\.com\/(?:document|spreadsheets|presentation|forms)\/d\/([A-Za-z0-9_-]{10,})/i);
+  if (m) return { kind: "google-doc", id: m[1] };
+
+  // open?id= / uc?id= are used for both files and folders; a bare id
+  // tells us nothing either. Hand back the id and let the caller try.
+  m = s.match(/drive\.google\.com\/(?:open|uc)\?[^"']*id=([A-Za-z0-9_-]{10,})/i);
+  if (m) return { kind: "unknown", id: m[1] };
+  if (/^[A-Za-z0-9_-]{10,}$/.test(s)) return { kind: "unknown", id: s };
+
+  return { kind: "unknown", id: null };
+}
+
+/**
+ * The message for a link that is valid but belongs in the other box.
+ *
+ * `expected` is what the field being typed into wants. Returns null when
+ * the input isn't a recognisable mismatch, so the caller falls back to
+ * its own generic message.
+ */
+export function wrongLinkKindMessage(
+  input: string,
+  expected: "file" | "folder",
+): string | null {
+  const { kind } = classifyDriveLink(input);
+
+  if (expected === "folder" && kind === "file") {
+    return "That's a link to a single file, not a folder. Open the folder in Drive and copy the URL from " +
+           "the address bar — a folder link contains /drive/folders/. " +
+           "To import just this one file instead, use the “paste a single file link” box on Import → Drive.";
+  }
+  if (expected === "file" && kind === "folder") {
+    return "That's a link to a folder, not a single file. Folders are registered once in " +
+           "Config → Drive source folders, and then browsed from the folder picker above — " +
+           "that lists every video in them so you can pick what to import.";
+  }
+  if (kind === "google-doc") {
+    return "That's a Google Doc / Sheet / Slides link, not a video. Only video files can be imported.";
+  }
+  return null;
+}
+
 /** The import-state source key for a folder (ADR-078 §7). */
 export function importStateKey(folder: Pick<DriveSourceFolder, "label">): string {
   return `GoogleDrive:${folder.label}`;

@@ -8,6 +8,8 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  classifyDriveLink,
+  wrongLinkKindMessage,
   detectFolderId,
   importStateKey,
   collectDriveFacts,
@@ -236,5 +238,82 @@ describe("classifyDriveFile — §4, dedupe", () => {
 describe("listing caps", () => {
   it("caps a single listing at 500 files", () => {
     expect(DRIVE_LIST_MAX_FILES).toBe(500);
+  });
+});
+
+/**
+ * The file-vs-folder trap, hit twice in one session on 2026-09-23:
+ * a file link pasted into the folder field (rejected with advice about
+ * folders), then a folder link pasted into the file box (rejected with
+ * advice about files). Both inputs sit on the same screen and a Drive
+ * link is valid for exactly one of them, so "paste the other kind" is
+ * true and useless — the message has to name what you pasted and where
+ * it belongs.
+ */
+describe("classifyDriveLink", () => {
+  const FOLDER = "1yvlASmg5muClP6dszxqBX1ZE2gU1-s5d";
+
+  it("recognises a file link", () => {
+    expect(classifyDriveLink(`https://drive.google.com/file/d/${FILE_ID}/view?usp=drive_link`))
+      .toEqual({ kind: "file", id: FILE_ID });
+  });
+
+  it("recognises a folder link, including an account-scoped one", () => {
+    expect(classifyDriveLink(`https://drive.google.com/drive/folders/${FOLDER}`).kind).toBe("folder");
+    expect(classifyDriveLink(`https://drive.google.com/drive/u/2/folders/${FOLDER}?usp=sharing`).kind).toBe("folder");
+  });
+
+  it("recognises a Google-native doc, which is never a video", () => {
+    expect(classifyDriveLink(`https://docs.google.com/document/d/${FILE_ID}/edit`).kind).toBe("google-doc");
+  });
+
+  it("stays honest about open?id= — Drive uses it for both", () => {
+    const g = classifyDriveLink(`https://drive.google.com/open?id=${FILE_ID}`);
+    expect(g.kind).toBe("unknown");
+    expect(g.id).toBe(FILE_ID);   // still usable, just not classifiable
+  });
+
+  it("stays honest about a bare id", () => {
+    expect(classifyDriveLink(FILE_ID)).toEqual({ kind: "unknown", id: FILE_ID });
+  });
+
+  it("returns nothing for input that isn't a Drive reference", () => {
+    expect(classifyDriveLink("https://youtube.com/watch?v=abc")).toEqual({ kind: "unknown", id: null });
+    expect(classifyDriveLink("")).toEqual({ kind: "unknown", id: null });
+  });
+});
+
+describe("wrongLinkKindMessage", () => {
+  const FOLDER = "1yvlASmg5muClP6dszxqBX1ZE2gU1-s5d";
+  const fileUrl = `https://drive.google.com/file/d/${FILE_ID}/view`;
+  const folderUrl = `https://drive.google.com/drive/folders/${FOLDER}`;
+
+  it("tells a folder field that it got a file, and where files go", () => {
+    const msg = wrongLinkKindMessage(fileUrl, "folder")!;
+    expect(msg).toContain("single file");
+    expect(msg).toContain("/drive/folders/");     // how to get the right link
+    expect(msg).toContain("single file link");    // where this one belongs
+  });
+
+  it("tells a file box that it got a folder, and where folders go", () => {
+    const msg = wrongLinkKindMessage(folderUrl, "file")!;
+    expect(msg).toContain("folder");
+    expect(msg).toContain("Drive source folders");  // names the actual screen
+  });
+
+  it("calls out a Google Doc whichever field it lands in", () => {
+    const docUrl = `https://docs.google.com/document/d/${FILE_ID}/edit`;
+    expect(wrongLinkKindMessage(docUrl, "file")).toContain("not a video");
+    expect(wrongLinkKindMessage(docUrl, "folder")).toContain("not a video");
+  });
+
+  it("says nothing when the link is the RIGHT kind — caller handles it", () => {
+    expect(wrongLinkKindMessage(fileUrl, "file")).toBeNull();
+    expect(wrongLinkKindMessage(folderUrl, "folder")).toBeNull();
+  });
+
+  it("says nothing for unclassifiable input, so the generic message shows", () => {
+    expect(wrongLinkKindMessage("total nonsense", "folder")).toBeNull();
+    expect(wrongLinkKindMessage(FILE_ID, "folder")).toBeNull();
   });
 });

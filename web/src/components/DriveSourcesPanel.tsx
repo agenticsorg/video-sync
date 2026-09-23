@@ -19,7 +19,7 @@ import {
   saveDriveSources,
   refreshDriveSources,
 } from "../lib/driveSourcesClient";
-import { detectFolderId, type DriveSourceFolder } from "../lib/driveSources";
+import { detectFolderId, wrongLinkKindMessage, type DriveSourceFolder } from "../lib/driveSources";
 import { getSeriesRegistry } from "../lib/seriesRegistryClient";
 import HelpTip from "./HelpTip";
 
@@ -72,7 +72,13 @@ export default function DriveSourcesPanel() {
   async function addFolder() {
     const folderId = detectFolderId(newUrl);
     if (!folderId) {
-      setError("Paste a Drive folder link (drive.google.com/drive/folders/…) or a raw folder id.");
+      // A file link here is the common mistake — the two inputs sit on
+      // the same screen and a Drive link is valid for exactly one of
+      // them. Say which one they pasted, not just what this box wants.
+      setError(
+        wrongLinkKindMessage(newUrl, "folder")
+        ?? "Paste a Drive folder link (drive.google.com/drive/folders/…) or a raw folder id.",
+      );
       return;
     }
     const label = newLabel.trim() || `Folder ${folders.length + 1}`;

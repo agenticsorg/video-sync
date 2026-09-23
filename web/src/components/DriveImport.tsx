@@ -20,6 +20,7 @@ import { videoStore } from "../lib/store";
 import type { DriveVideoMetadata, DriveMetadataRequiresAuth } from "../app/api/drive/metadata/route";
 import HelpTip from "./HelpTip";
 import DriveFolderImport from "./DriveFolderImport";
+import { wrongLinkKindMessage } from "../lib/driveSources";
 
 interface Props {
   onImported: (imported?: { ids: string[] }) => void;
@@ -47,7 +48,10 @@ export default function DriveImport({ onImported, onEvent }: Props) {
     setError(null); setMeta(null); setPending(null);
     const fileId = detectFileId(url);
     if (!fileId) {
-      setError("Paste a Google Drive file link (drive.google.com/file/d/…) or a raw file ID.");
+      setError(
+        wrongLinkKindMessage(url, "file")
+        ?? "Paste a Google Drive file link (drive.google.com/file/d/…) or a raw file ID.",
+      );
       return;
     }
     setStatus("fetching");
