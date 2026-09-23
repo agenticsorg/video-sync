@@ -196,11 +196,29 @@ gcloud storage buckets update gs://video-sync-data-agentics-487016 --versioning
 
 §3's reasoning about a re-pull retaining the previous `<record-id>.mp4` is therefore true from this date, and was not true for any ingest before it.
 
-### Still open — noncurrent-version retention
+### Resolved — noncurrent-version retention (2026-09-23)
 
-There is no lifecycle rule, so noncurrent versions accumulate indefinitely. Two very different profiles share this bucket:
+Two very different profiles share this bucket:
 
-- **`catalog.json`** — ~520 KB, rewritten on every batched push. Frequent small versions; the bulk of the version count.
-- **Video binaries** — hundreds of MB each, overwritten only on a re-pull. Rare, but each version is expensive. The bucket is already ~7.5 GB, almost all video.
+- **Root-level state JSON** (`catalog.json`, `rules.json`, `series-registry.json`, …) — small, rewritten constantly. `catalog.json` alone is written on every batched push.
+- **`videos/`** — hundreds of MB each, overwritten only on a re-pull. The bucket is ~7.5 GB, almost all video.
 
-A rule deleting noncurrent versions after 30 days would bound the tail while keeping a recovery window far longer than the minutes that mattered here. Not applied yet: it deletes data, so it wants an explicit decision rather than arriving alongside an incident fix.
+**A time-only rule was rejected.** "Delete noncurrent versions after 30 days" reads as safe and isn't: if the tool goes unused for a month, it deletes every version — precisely when an old version is most likely to be the thing you need. Dormancy should not consume the safety net.
+
+The policy is therefore count-based with an age floor, both conditions ANDed so a version must exceed *both* before it is eligible:
+
+| Scope | Keep at least | And at least |
+|---|---|---|
+| Everything | the 50 newest noncurrent versions | 14 days of noncurrent history |
+| `videos/` | the 3 newest noncurrent versions | 7 days of noncurrent history |
+
+The count bound survives dormancy — no writes, no deletions, versions persist indefinitely. The age floor covers the opposite failure: a burst of activity can produce 50 versions of `catalog.json` in well under a day, and a count-only rule would then prune anything older than that burst. Neither bound alone is sufficient; the pair is.
+
+`videos/` gets its own, tighter rule because a version there costs ~1000× what a version of `catalog.json` costs, and its purpose is narrower — §3's "cheap safety-net against a bad re-pull", which needs a couple of versions, not fifty. Lifecycle rules are OR'd across the set, so the tighter `videos/` rule fires before the general one ever applies to a binary.
+
+Applied 2026-09-23:
+
+```bash
+gcloud storage buckets update gs://video-sync-data-agentics-487016 \
+  --lifecycle-file=lifecycle.json
+```

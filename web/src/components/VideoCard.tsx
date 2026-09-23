@@ -1134,6 +1134,101 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
    * YouTube and Kaltura at once) is Phase 2 in ADR-037 — it requires
    * decoupling the upload step from the mark_published transition.
    */
+  /**
+   * Side-publish to YouTube — the mirror of publishToKaltura.
+   *
+   * Incident 2026-09-23 exposed the gap: a record whose YouTube leg
+   * failed while Kaltura landed ends up Published with YouTube
+   * outstanding, and there was no affordance to finish the job.
+   * canSidePublishKaltura covered the opposite case; nothing covered
+   * this one, so the only route was Retry → re-approve → publish both,
+   * which re-pushes a destination that already succeeded.
+   *
+   * Runs the same grant pre-flight as the main publish: this is the
+   * path an operator takes precisely BECAUSE YouTube failed, so the
+   * grant is the most likely thing still wrong.
+   */
+  async function publishToYouTubeOnly() {
+    const attrs = publishAttrs ?? applyProcessingRules(loadProcessingRules(), video);
+
+    setShowPreview(false);
+    setUploading(true);
+    setPublishError(null);
+
+    setUploadPhase("Checking YouTube authorisation…");
+    const problem = await assertGrantForPublish();
+    if (problem) {
+      setPublishError({
+        message: problem,
+        hint: "Re-authorise YouTube, then try again.",
+        hintHref: "/config#connections",
+      });
+      onEvent(`PublishBlocked: "${video.title}"${dateTag(video.recorded_at)} — ${problem}`, { video_id: video.id });
+      setUploading(false);
+      setUploadPhase("");
+      return;
+    }
+
+    setUploadPhase("Uploading to YouTube…");
+    try {
+      const spec = specForPlatform("YouTube");
+      const report = await executePublish({
+        record: video,
+        destinations: [spec],
+        attrsFor: (s) => ({
+          title: attrs.title ?? video.title,
+          description: withProvenanceFooter(
+            attrs.description ?? video.description,
+            recordProvenanceParts(video),
+            s.platform,
+          ),
+          tags: attrs.tags ?? video.tags ?? [],
+          visibility: attrs.privacy_status,
+          trimStartSeconds: attrs.trim_start_seconds,
+        }),
+        sourceUrlFor: () => video.download_url,
+        creds: buildPublishCredentials(video.download_url),
+        onPhase: setUploadPhase,
+      });
+
+      const outcome = report.results[0];
+      if (outcome.status !== "pushed") {
+        // Record the failure on the record, same as the main path —
+        // not doing that is what made the original incident invisible.
+        recordDestinationFailure("YouTube", outcome.error ?? outcome.skipReason ?? "publish did not complete");
+        throw new Error(outcome.error ?? outcome.skipReason ?? "YouTube publish did not complete");
+      }
+      const videoId = outcome.external_id!;
+      const url = outcome.external_url ?? `https://youtu.be/${videoId}`;
+
+      // Flips the existing Failed outcome to Pushed, so a record that
+      // was "Published, YouTube outstanding" becomes fully published.
+      const recorded = recordDestinationOutcome("YouTube", videoId, url);
+      onEvent(
+        recorded
+          ? `VideoPublished: "${video.title}"${dateTag(video.recorded_at)} -> YouTube ${url}`
+          : `YouTube destination added: "${video.title}"${dateTag(video.recorded_at)} -> ${url}`,
+        { video_id: video.id },
+      );
+      onMutated();
+      firePostProcessingRules(loadPostProcessingRules(), true, video, url);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (video.status === "Publishing") {
+        videoStore.mutate(video.id, (r) =>
+          r.mark_failed(JSON.stringify({ error_message: msg })),
+        );
+      }
+      onEvent(`VideoPublishFailed: "${video.title}"${dateTag(video.recorded_at)} — YouTube: ${msg}`, { video_id: video.id });
+      setPublishError(classifyPublishError(msg));
+      onMutated();
+      firePostProcessingRules(loadPostProcessingRules(), false, video, undefined, msg);
+    } finally {
+      setUploading(false);
+      setUploadPhase("");
+    }
+  }
+
   async function publishToKaltura() {
     const attrs = publishAttrs ?? applyProcessingRules(loadProcessingRules(), video);
 
@@ -2455,6 +2550,18 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
   // missing. Kaltura must be configured in Connections.
   const canSidePublishKaltura = !alreadyOnKaltura
     && (status === "Published" || (status === "Approved" && alreadyPublished));
+  /**
+   * The mirror of canSidePublishKaltura: something landed, but YouTube
+   * didn't. Added after the 2026-09-23 incident, where a record sat
+   * Published with a Failed YouTube outcome and no way to finish it.
+   *
+   * Gated on a recorded Failed outcome OR a plain absence, so it covers
+   * both the post-fix case (failure recorded) and records that predate
+   * the fix (failure dropped, YouTube simply missing).
+   */
+  const youtubeOutcomeFailed = (video.destination_outcomes ?? [])
+    .some(o => o.platform === "YouTube" && o.state === "Failed");
+  const canSidePublishYouTube = !alreadyPublished && status === "Published";
 
   // ADR-075 Phase 2 follow-up — resolve destinations for THIS record
   // so the publish buttons reflect the series configuration. When the
@@ -4315,6 +4422,18 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
             title="This record is Approved and already has a YouTube destination. Mark it Published so it leaves the Active list."
           >
             Already on YouTube — mark Published
+          </button>
+        )}
+        {canSidePublishYouTube && showYouTubeBtn && (
+          <button
+            className="btn btn-sm btn-green"
+            onClick={publishToYouTubeOnly}
+            disabled={uploading}
+            title={youtubeOutcomeFailed
+              ? "YouTube failed on the last publish. Retry just this destination — the ones that already landed are untouched."
+              : "This record is Published elsewhere but not on YouTube. Publish just this destination."}
+          >
+            {uploading ? "Uploading…" : youtubeOutcomeFailed ? "Retry YouTube" : "Publish to YouTube"}
           </button>
         )}
         {canSidePublishKaltura && showKalturaBtn && (
