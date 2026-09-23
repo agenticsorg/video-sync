@@ -17,6 +17,7 @@ import RulesPanel from "../../../components/RulesPanel";
 import ProcessingRulesPanel from "../../../components/ProcessingRulesPanel";
 import PostProcessingRulesPanel from "../../../components/PostProcessingRulesPanel";
 import SeriesRegistryPanel from "../../../components/SeriesRegistryPanel";
+import DriveSourcesPanel from "../../../components/DriveSourcesPanel";
 import DescriptionConfigPanel from "../../../components/DescriptionConfigPanel";
 import SummaryPromptPanel from "../../../components/SummaryPromptPanel";
 import McpTokensPanel from "../../../components/McpTokensPanel";
@@ -59,6 +60,7 @@ export default function ConfigPage() {
       <ProcessingRulesPanel />
       <PostProcessingRulesPanel />
       <SeriesRegistryPanel />
+      <DriveSourcesPanel />
       <DescriptionConfigPanel />
       <McpTokensPanel />
       <AccessLogPanel />

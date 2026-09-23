@@ -28,10 +28,26 @@ function relativeTime(iso: string): string {
   return `${Math.floor(secs / 86400)}d ago`;
 }
 
-const SOURCES = ["Zoom", "Fireflies", "YouTube", "Kaltura"] as const;
+/** The four fixed source platforms. ADR-078 §7 adds registered Drive
+ *  folders on top of these, keyed `GoogleDrive:<label>` — so the banner
+ *  covers every source that can report a checked range, not just the
+ *  ones that existed when ADR-058 shipped. */
+const FIXED_SOURCES = ["Zoom", "Fireflies", "YouTube", "Kaltura"] as const;
+
+/** Fixed platforms first, then whatever Drive folders the import state
+ *  has actually seen. Deriving the Drive half from the state rather
+ *  than the registry keeps the banner honest: it lists what has been
+ *  checked, not what could be. */
+function sourceKeys(state: ImportStateSnapshot): string[] {
+  const driveKeys = Object.keys(state.sources)
+    .filter(k => k.startsWith("GoogleDrive:"))
+    .sort();
+  return [...FIXED_SOURCES, ...driveKeys];
+}
 
 function LastCheckedBanner({ state }: { state: ImportStateSnapshot }) {
-  const hasAny = SOURCES.some(s => state.sources[s]);
+  const keys = sourceKeys(state);
+  const hasAny = keys.some(s => state.sources[s]);
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
@@ -43,7 +59,7 @@ function LastCheckedBanner({ state }: { state: ImportStateSnapshot }) {
       <span style={{ color: "var(--text-muted)", fontWeight: 600 }}>
         Last checked (ADR-058):
       </span>
-      {SOURCES.map(source => {
+      {keys.map(source => {
         const s = state.sources[source];
         const label = s
           ? `${relativeTime(s.last_checked_at)} — ${s.last_range_from} → ${s.last_range_to}`

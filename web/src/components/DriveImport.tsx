@@ -19,6 +19,7 @@ import { WasmVideoRecord } from "../lib/wasm";
 import { videoStore } from "../lib/store";
 import type { DriveVideoMetadata, DriveMetadataRequiresAuth } from "../app/api/drive/metadata/route";
 import HelpTip from "./HelpTip";
+import DriveFolderImport from "./DriveFolderImport";
 
 interface Props {
   onImported: (imported?: { ids: string[] }) => void;
@@ -122,6 +123,14 @@ export default function DriveImport({ onImported, onEvent }: Props) {
       <div className="zoom-import-header">
         <h2>Import from Google Drive</h2>
       </div>
+      {/* ADR-078 — folder mode sits above the paste box: browsing a
+          registered folder is the common case now, and pasting a single
+          link is the fallback for a one-off file outside any folder. */}
+      <DriveFolderImport onImported={onImported} onEvent={onEvent} />
+
+      <div style={{ height: 1, background: "var(--border)", margin: "4px 0 12px" }} />
+
+      <h3 style={{ fontSize: "0.9rem", margin: "0 0 4px" }}>Or paste a single file link</h3>
       <HelpTip>
         Paste a <code>drive.google.com/file/d/…</code> link. Files publicly shared OR shared with the org
         runtime service account can be pulled. Bytes stream to the FUSE bucket at import time (ADR-071).
