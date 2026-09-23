@@ -1778,30 +1778,40 @@ fn test_a_record_stored_without_description_provenance_deserialises() {
 
 #[test]
 fn test_the_client_command_payload_deserialises() {
-    // The TS side hand-builds this JSON via actorCommand(); nothing in
-    // either test suite crosses that boundary, so pin the shape here.
-    // `email` is present on the client actor and absent on the Rust one
-    // — serde must ignore it rather than fail the whole command.
+    // The TS side builds this with actorCommand(), which is
+    // `JSON.stringify({ actor, ...extra })` — the actor is NESTED, not
+    // flattened alongside the other fields. An earlier version of this
+    // test asserted a flat shape; it passed while describing a payload
+    // the client never sends, which is worse than no test at all.
+    //
+    // `email` rides along on the client's actor object and has no
+    // counterpart on the Rust Actor — serde must ignore it rather than
+    // failing the whole command.
     let json = r#"{
-        "user_id": "00000000-0000-0000-0000-000000000001",
-        "role": "Admin",
-        "email": "curator@agentics.org",
+        "actor": {
+            "user_id": "00000000-0000-0000-0000-000000000001",
+            "role": "Admin",
+            "email": "curator@agentics.org"
+        },
         "text": "Generated description text.",
         "source": "ShowNotesLlm",
         "source_doc_id": "doc-1",
         "source_prompt_version": 3,
         "generated_at": "2026-09-09T12:00:00Z"
     }"#;
-    // The actor is flattened into the same object on the client, so the
-    // command struct sees it as a sibling of the other fields — which is
-    // how every other command in this file is already shaped.
-    let value: serde_json::Value = serde_json::from_str(json).unwrap();
-    let actor: Actor = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(actor.role, UserRole::Admin);
 
-    let source: DescriptionSource =
-        serde_json::from_value(value.get("source").unwrap().clone()).unwrap();
-    assert_eq!(source, DescriptionSource::ShowNotesLlm);
+    let cmd: SetDescriptionMetadata =
+        serde_json::from_str(json).expect("client payload must deserialise");
+    assert_eq!(cmd.actor.role, UserRole::Admin);
+    assert_eq!(cmd.source, DescriptionSource::ShowNotesLlm);
+    assert_eq!(cmd.source_doc_id.as_deref(), Some("doc-1"));
+    assert_eq!(cmd.source_prompt_version, Some(3));
+
+    // And it actually applies.
+    let mut rec = approved_record();
+    let events = rec.set_description_metadata(cmd).unwrap();
+    assert_eq!(rec.description_source, Some(DescriptionSource::ShowNotesLlm));
+    assert!(matches!(events[0], CatalogEvent::DescriptionGenerated(_)));
 }
 
 #[test]

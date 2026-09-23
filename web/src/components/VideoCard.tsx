@@ -35,6 +35,7 @@ import { resolveAlignedTitle, resolveAlignedTitleForced, resolveDiscordChannel }
 import { getSeriesRegistry, getSeriesRegistryCached } from "../lib/seriesRegistryClient";
 import { getDescriptionConfigCached } from "../lib/descriptionConfig";
 import { ensureDescription } from "../lib/descriptionGenerate";
+import { assertGrantForPublish, getGrant, getGrantCached, grantWarning, type GrantStatus } from "../lib/youtubeGrant";
 import { formatDateHover } from "../lib/dateHover";
 import { resolveContributingAccount } from "../lib/contributingAccount";
 import { resolveDestinations, destinationLabel, isAutomatedDestination, appliesDeclaredVisibility, withPreviewVisibilityOverride } from "../lib/destinationResolver";
@@ -164,6 +165,10 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
   const [publishError, setPublishError] = useState<{ message: string; hint?: string; hintHref?: string } | null>(null);
   const [publishAttrs, setPublishAttrs] = useState<PublishAttributes | null>(null);
   const [showPreview, setShowPreview] = useState(false);
+  /** YouTube grant state, so an expired authorisation is visible in the
+   *  publish preview rather than discovered mid-upload. Seeded from the
+   *  shared cache so a second card costs no request. */
+  const [ytGrant, setYtGrant] = useState<GrantStatus | null>(() => getGrantCached());
   const [locPlatform, setLocPlatform] = useState<string>("Loom");
   const [locExternalId, setLocExternalId] = useState("");
   const [locExternalUrl, setLocExternalUrl] = useState("");
@@ -889,6 +894,31 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
     const sourceUrlFor = (spec: DestinationSpec) =>
       spec.platform === "Kaltura" ? kalturaSource.url : video.download_url;
 
+    // Pre-flight: an expired YouTube grant is knowable now, cheaply.
+    //
+    // Incident 2026-09-23 — the grant had expired, YouTube failed deep
+    // inside the upload, and by then Kaltura had already been pushed.
+    // The record was half-published and had to be repaired by hand.
+    // Checking first turns that into a message before anything moves.
+    //
+    // Only blocks when we positively know the grant is bad; an
+    // unreachable check returns null and lets the publish proceed.
+    if (targets.some(t => t.platform === "YouTube")) {
+      setUploadPhase("Checking YouTube authorisation…");
+      const problem = await assertGrantForPublish();
+      if (problem) {
+        setPublishError({
+          message: problem,
+          hint: "Re-authorise YouTube, then publish again.",
+          hintHref: "/config#connections",
+        });
+        onEvent(`PublishBlocked: "${video.title}"${dateTag(video.recorded_at)} — ${problem}`, { video_id: video.id });
+        setUploading(false);
+        setUploadPhase("");
+        return;
+      }
+    }
+
     if (attrs.trim_start_seconds > 0) {
       onEvent(`TrimApplied: "${video.title}"${dateTag(video.recorded_at)} — ${attrs.trim_start_seconds}s from start`, { video_id: video.id });
     }
@@ -1265,9 +1295,21 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
    *  below governs YouTube and nothing else, so it hides when YouTube isn't
    *  a target. Falls back to true when destinations haven't resolved yet,
    *  preserving the pre-ADR-075 single-destination behaviour. */
+  useEffect(() => {
+    if (!showPreview) return;
+    let cancelled = false;
+    void getGrant().then(g => { if (!cancelled) setYtGrant(g); });
+    return () => { cancelled = true; };
+  }, [showPreview]);
+
   const previewTargetsYouTube = destinationsPreview
     ? destinationsPreview.destinations.some(d => d.platform === "YouTube")
     : true;
+  /** Operator-facing advisory when the grant is known bad. Null while
+   *  unchecked, when valid, or when the check itself failed — an
+   *  unreachable check is not evidence of an expired grant. */
+  const ytGrantWarning = grantWarning(ytGrant);
+
   /** Whether anything OTHER than YouTube is targeted, in which case the
    *  per-platform caveat is worth stating. */
   const previewHasNonYouTube = !!destinationsPreview
@@ -3847,6 +3889,30 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
               read as one setting for the whole publish, which it never was.
               Hidden entirely when YouTube isn't a target, since it would
               then govern nothing. */}
+          {previewTargetsYouTube && ytGrantWarning && (
+            <div
+              style={{
+                display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+                padding: "6px 10px", marginBottom: 8,
+                background: "rgba(251,191,36,0.10)",
+                border: "1px solid rgba(251,191,36,0.35)",
+                borderRadius: 6, fontSize: "0.75rem", color: "#fbbf24",
+              }}
+            >
+              <span>⚠ {ytGrantWarning} — publishing to YouTube will be refused until it's fixed.</span>
+              <a href="/config" style={{ fontSize: "0.72rem", textDecoration: "underline" }}>
+                Fix in Connections
+              </a>
+              <button
+                className="btn btn-sm"
+                style={{ fontSize: "0.68rem", marginLeft: "auto" }}
+                onClick={() => { void getGrant(true).then(setYtGrant); }}
+                title="Re-check now — use after re-authorising"
+              >
+                Re-check
+              </button>
+            </div>
+          )}
           {previewTargetsYouTube && (
             <div className="form-field">
               <label>YouTube privacy</label>
