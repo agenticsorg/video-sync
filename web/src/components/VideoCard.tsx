@@ -41,6 +41,7 @@ import { resolveContributingAccount } from "../lib/contributingAccount";
 import { resolveDestinations, destinationLabel, isAutomatedDestination, appliesDeclaredVisibility, withPreviewVisibilityOverride } from "../lib/destinationResolver";
 import { withProvenanceFooter, recordProvenanceParts } from "../lib/publish/provenanceFooter";
 import { executePublish } from "../lib/publish/execute";
+import { advanceToPublished } from "../lib/publish/advance";
 import { extractDriveFolderId } from "../lib/publish/driveFolderId";
 import type { PublishCredentials } from "../lib/publish/types";
 import type { DestinationSpec } from "../lib/youtubeTitleAlign";
@@ -923,144 +924,32 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
       onEvent(`TrimApplied: "${video.title}"${dateTag(video.recorded_at)} — ${attrs.trim_start_seconds}s from start`, { video_id: video.id });
     }
 
-    let lastPushedUrl: string | undefined;
+    // ADR-079 §1 — the orchestration lives in lib/publish/advance.ts so
+    // something other than this component can publish. What stays here
+    // is UI state: the card owns its banner, its spinner and its
+    // preview, and the pipeline owns what happens to the record.
     try {
-      const report = await executePublish({
+      const result = await advanceToPublished({
         record: video,
-        destinations: targets,
-        attrsFor: (spec) => ({
-          title: attrs.title ?? video.title,
-          description: withProvenanceFooter(
-            attrs.description ?? video.description,
-            recordProvenanceParts(video),
-            spec.platform,
-          ),
-          tags: attrs.tags ?? video.tags ?? [],
-          // The preview's privacy dropdown is ADR-075's layer-4 per-record
-          // override, so for YouTube it beats the series' declared value.
-          // Other platforms have no preview control yet and take theirs
-          // from the declaration.
-          visibility: spec.platform === "YouTube"
-            ? attrs.privacy_status
-            : spec.platform === "Kaltura" ? spec.visibility : undefined,
-          trimStartSeconds: attrs.trim_start_seconds,
-        }),
-        sourceUrlFor,
+        targets,
+        attrs,
+        actorState,
         creds: buildPublishCredentials(video.download_url),
+        sourceUrlFor,
+        kalturaSource,
         onPhase: setUploadPhase,
-        onOutcome: (outcome) => {
-          const label = destinationLabel(outcome.spec);
-          if (outcome.status === "skipped") {
-            onEvent(`PublishSkipped: "${video.title}"${dateTag(video.recorded_at)} — ${outcome.skipReason}`, { video_id: video.id });
-            return;
-          }
-          if (outcome.status === "failed") {
-            onEvent(`VideoPublishFailed: "${video.title}"${dateTag(video.recorded_at)} — ${label}: ${outcome.error}`, { video_id: video.id });
-            // Record the failure ON THE RECORD, not just in the event log.
-            //
-            // Incident 2026-09-23: this branch returned here. YouTube
-            // failed on an expired grant, Kaltura succeeded, and the
-            // record ended up with a single Pushed outcome — so
-            // is_fully_published() and missing_destinations(), which are
-            // both computed from destination_outcomes, saw nothing
-            // outstanding. The card left the review queue looking
-            // completely published while half of its declared
-            // destinations had never happened.
-            //
-            // A partial publish IS Published (ADR-077 §Decisions-resolved
-            // #1) and that stays true — but only a durable Failed outcome
-            // makes "Published with one destination outstanding"
-            // distinguishable from "Published everywhere".
-            recordDestinationFailure(
-              outcome.spec.platform as "YouTube" | "Kaltura" | "GoogleDrive",
-              outcome.error ?? "publish failed",
-            );
-            return;
-          }
-
-          const id = outcome.external_id!;
-          const url = outcome.external_url ?? "";
-          lastPushedUrl = url || lastPushedUrl;
-          recordDestinationOutcome(
-            outcome.spec.platform as "YouTube" | "Kaltura" | "GoogleDrive",
-            id,
-            url,
-          );
-          const sourcedFrom = outcome.spec.platform === "Kaltura" && kalturaSource.chosenOverPrimary
-            ? ` (sourced from ${kalturaSource.platform})`
-            : "";
-          onEvent(`VideoPublished: "${video.title}"${dateTag(video.recorded_at)} -> ${label} ${url}${sourcedFrom}`, { video_id: video.id });
-
-          // ADR-077 §5 — record what the platform's visibility actually
-          // is, where the adapter could read it back. Declared vs observed
-          // living side by side on the outcome is what makes §6's
-          // conformance check possible.
-          if (outcome.observed_visibility) {
-            try {
-              videoStore.mutate(video.id, (r) =>
-                r.recordObservedVisibility(JSON.stringify({
-                  platform: outcome.spec.platform,
-                  visibility: outcome.observed_visibility,
-                })),
-              );
-            } catch { /* no outcome for this platform yet — nothing to annotate */ }
-          }
-          if (outcome.visibility_applied === false) {
-            onEvent(`PublishVisibilityNotApplied: "${video.title}"${dateTag(video.recorded_at)} — ${label} landed but its declared visibility did not take: ${outcome.visibility_error ?? "unknown reason"}`, { video_id: video.id });
-          }
-
-          if (outcome.spec.platform === "YouTube") {
-            // We know what privacy we asked for — no round-trip needed. A
-            // later Check Status refreshes it if YouTube disagrees.
-            setPrivacy(id, normalisePrivacy(attrs.privacy_status));
-            void ingestYouTubeRowAfterPublish(id);
-          }
+        onEvent,
+        onYouTubePushed: (ytVideoId, privacyStatus) => {
+          // We know what privacy we asked for — no round-trip needed. A
+          // later Check Status refreshes it if YouTube disagrees.
+          setPrivacy(ytVideoId, normalisePrivacy(privacyStatus));
+          void ingestYouTubeRowAfterPublish(ytVideoId);
         },
       });
 
       onMutated();
-
-      if (!report.anyPushed) {
-        // Nothing landed. The aggregate has already moved the record to
-        // Failed via record_destination_result when every declared
-        // destination failed, so mark_failed is best-effort here — it
-        // covers the case where no outcome was recorded at all (e.g. every
-        // target skipped).
-        const detail = report.results
-          .map(r => `${destinationLabel(r.spec)}: ${r.error ?? r.skipReason ?? "not attempted"}`)
-          .join("; ");
-        try {
-          videoStore.mutate(video.id, (r) => r.mark_failed(JSON.stringify({ error_message: detail })));
-        } catch { /* already Failed, or not in a state that accepts it */ }
-        setPublishError(classifyPublishError(detail));
-        firePostProcessingRules(loadPostProcessingRules(), false, video, undefined, detail);
-        onMutated();
-        return;
-      }
-
-      if (report.failed > 0) {
-        // Partial publish: the record is Published (ADR-077
-        // §Decisions-resolved #1) but the operator needs to know which
-        // destination still needs attention.
-        const failedLabels = report.results
-          .filter(r => r.status === "failed")
-          .map(r => `${destinationLabel(r.spec)}: ${r.error}`)
-          .join("; ");
-        setPublishError(classifyPublishError(`Published, but ${report.failed} destination(s) failed — ${failedLabels}`));
-      }
-
-      firePostProcessingRules(loadPostProcessingRules(), true, video, lastPushedUrl);
-    } catch (err) {
-      // The executor absorbs per-destination failures, so reaching here
-      // means something outside a push broke.
-      const msg = err instanceof Error ? err.message : String(err);
-      try {
-        videoStore.mutate(video.id, (r) => r.mark_failed(JSON.stringify({ error_message: msg })));
-      } catch { /* not in a state that accepts it */ }
-      onEvent(`VideoPublishFailed: "${video.title}"${dateTag(video.recorded_at)} — ${msg}`, { video_id: video.id });
-      setPublishError(classifyPublishError(msg));
-      onMutated();
-      firePostProcessingRules(loadPostProcessingRules(), false, video, undefined, msg);
+      if (result.message) setPublishError(classifyPublishError(result.message));
+      if (result.status === "failed" || result.status === "error") onMutated();
     } finally {
       setUploading(false);
       setUploadPhase("");
