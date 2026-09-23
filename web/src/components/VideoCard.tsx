@@ -810,6 +810,18 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
       }
     }
 
+    // Seed the privacy control from the resolved YouTube destination
+    // rather than applyProcessingRules' blanket "unlisted" default. The
+    // dropdown previously showed Unlisted while the record's series
+    // declared public, and the publish followed the dropdown — so the
+    // screen agreed with the wrong answer. Now it opens on the series'
+    // value and only differs when the operator changes it, which is
+    // what ADR-075's layer-4 override is actually for.
+    const declaredYouTube = resolvedDests.destinations.find(d => d.platform === "YouTube");
+    if (declaredYouTube && declaredYouTube.platform === "YouTube") {
+      attrs = { ...attrs, privacy_status: declaredYouTube.visibility };
+    }
+
     setPublishAttrs(attrs);
     setShowPreview(true);
   }
@@ -859,7 +871,13 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
 
     // Only the destinations we can actually push. A declared `Other`
     // target stays a checklist item for the operator.
-    const targets = (only ?? resolvedDests.destinations).filter(isAutomatedDestination);
+    // ADR-075 layer 4 — the preview's per-record override, applied to
+    // the resolved specs. withPreviewVisibilityOverride was exported for
+    // exactly this and had no caller, which is how the declared
+    // visibility came to be ignored.
+    const targets = (only ?? resolvedDests.destinations)
+      .filter(isAutomatedDestination)
+      .map(d => withPreviewVisibilityOverride(d, publishAttrs?.privacy_status));
     if (targets.length === 0) {
       setPublishError({
         message: "This record resolves to no automated destination.",
@@ -1072,7 +1090,11 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
             s.platform,
           ),
           tags: attrs.tags ?? video.tags ?? [],
-          visibility: attrs.privacy_status,
+          // The declared visibility, not the processing-rules default.
+          // This path has no preview, so there is no layer-4 override to
+          // apply — taking attrs.privacy_status here would mean a
+          // side-publish silently downgraded a public series to unlisted.
+          visibility: s.platform === "YouTube" ? s.visibility : undefined,
           trimStartSeconds: attrs.trim_start_seconds,
         }),
         sourceUrlFor: () => video.download_url,

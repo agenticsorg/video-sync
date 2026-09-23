@@ -217,13 +217,23 @@ export async function advanceToPublished(
           spec.platform,
         ),
         tags: attrs.tags ?? record.tags ?? [],
-        // The preview's privacy dropdown is ADR-075's layer-4 per-record
-        // override, so for YouTube it beats the series' declared value.
-        // Other platforms have no preview control yet and take theirs
-        // from the declaration.
-        visibility: spec.platform === "YouTube"
-          ? attrs.privacy_status
-          : spec.platform === "Kaltura" ? spec.visibility : undefined,
+        // Every platform takes the visibility its resolved spec carries.
+        //
+        // This used to read `attrs.privacy_status` for YouTube, on the
+        // grounds that the preview dropdown is ADR-075's layer-4
+        // per-record override. But that field is not an override — it is
+        // applyProcessingRules' unconditional default of "unlisted"
+        // unless a rule happened to set it, so a series declaring
+        // `visibility: "public"` was silently published unlisted with
+        // nothing on screen disagreeing.
+        //
+        // The resolver already layers this correctly: global default,
+        // then the series declaration, then a rule transform. Layer 4 is
+        // applied by the caller via withPreviewVisibilityOverride, so by
+        // the time a spec reaches here its visibility IS the answer.
+        visibility: spec.platform === "YouTube" || spec.platform === "Kaltura"
+          ? spec.visibility
+          : undefined,
         trimStartSeconds: attrs.trim_start_seconds,
       }),
       sourceUrlFor,

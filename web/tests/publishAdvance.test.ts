@@ -17,6 +17,7 @@ import type { DestinationResult, ExecutePublishReport } from "../src/lib/publish
 // everything under test is the orchestration around that report.
 
 const mutations: Array<{ id: string; kind: string; payload: unknown }> = [];
+const sentAttrs: Array<{ platform: string; visibility?: string }> = [];
 const postProcessing: Array<{ success: boolean; url?: string; error?: string }> = [];
 let executeImpl: () => Promise<ExecutePublishReport>;
 
@@ -24,7 +25,17 @@ vi.mock("../src/lib/publish/execute", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/publish/execute")>();
   return {
     ...actual,
-    executePublish: vi.fn(async (req: { onOutcome?: (o: DestinationResult) => void }) => {
+    executePublish: vi.fn(async (req: {
+      destinations?: Array<{ platform: string; visibility?: string }>;
+      onOutcome?: (o: DestinationResult) => void;
+      attrsFor?: (spec: { platform: string; visibility?: string }) => { visibility?: string };
+    }) => {
+      // The real executor calls attrsFor once per destination it walks,
+      // with the destination spec — not with a result. Mirroring that is
+      // the whole point: the spec is where visibility now comes from.
+      for (const d of req.destinations ?? []) {
+        sentAttrs.push({ platform: d.platform, visibility: req.attrsFor?.(d as never)?.visibility });
+      }
       const report = await executeImpl();
       for (const r of report.results) req.onOutcome?.(r);
       return report;
@@ -125,6 +136,7 @@ function run(results: DestinationResult[], impl?: () => Promise<ExecutePublishRe
 beforeEach(() => {
   mutations.length = 0;
   postProcessing.length = 0;
+  sentAttrs.length = 0;
 });
 
 // ── The verdict ─────────────────────────────────────────────────────
@@ -228,5 +240,73 @@ describe("advanceToPublished — post-processing rules fire once, with the right
   it("marks the record Failed when nothing landed", async () => {
     await run([failed("YouTube", "boom")]);
     expect(mutations.some(m => m.kind === "mark_failed")).toBe(true);
+  });
+});
+
+// ── Declared visibility (ADR-075 layering) ──────────────────────────
+
+describe("advanceToPublished — visibility comes from the resolved spec", () => {
+  it("sends the series' declared visibility to YouTube", async () => {
+    // The bug: this read attrs.privacy_status, which is
+    // applyProcessingRules' unconditional "unlisted" default unless a
+    // rule set it. A series declaring public published unlisted, and
+    // the preview agreed with the wrong answer so nothing looked off.
+    executeImpl = async () => report([pushed("YouTube", "yt1")]);
+    await advanceToPublished({
+      record: RECORD,
+      targets: [{ platform: "YouTube", visibility: "public" } as never],
+      attrs: { ...(ATTRS as object), privacy_status: "unlisted" } as never,
+      actorState: {} as never,
+      creds: {} as never,
+      sourceUrlFor: () => "https://example.test/src.mp4",
+      onEvent: () => {},
+    });
+    expect(sentAttrs.find(a => a.platform === "YouTube")?.visibility).toBe("public");
+  });
+
+  it("still honours a layer-4 override, because the caller applies it to the spec", async () => {
+    // withPreviewVisibilityOverride rewrites the spec before it gets
+    // here, so an operator's dropdown change arrives as spec.visibility
+    // rather than via a parallel attrs field.
+    executeImpl = async () => report([pushed("YouTube", "yt1")]);
+    await advanceToPublished({
+      record: RECORD,
+      targets: [{ platform: "YouTube", visibility: "private" } as never],
+      attrs: { ...(ATTRS as object), privacy_status: "public" } as never,
+      actorState: {} as never,
+      creds: {} as never,
+      sourceUrlFor: () => "https://example.test/src.mp4",
+      onEvent: () => {},
+    });
+    expect(sentAttrs.find(a => a.platform === "YouTube")?.visibility).toBe("private");
+  });
+
+  it("keeps Kaltura on its own declared visibility", async () => {
+    executeImpl = async () => report([pushed("Kaltura", "k1")]);
+    await advanceToPublished({
+      record: RECORD,
+      targets: [{ platform: "Kaltura", visibility: "members" } as never],
+      attrs: ATTRS,
+      actorState: {} as never,
+      creds: {} as never,
+      sourceUrlFor: () => "https://example.test/src.mp4",
+      onEvent: () => {},
+    });
+    expect(sentAttrs.find(a => a.platform === "Kaltura")?.visibility).toBe("members");
+  });
+
+  it("sends no visibility for a platform that has no such vocabulary", async () => {
+    // Drive has share_scope, not a visibility enum.
+    executeImpl = async () => report([pushed("GoogleDrive", "f1")]);
+    await advanceToPublished({
+      record: RECORD,
+      targets: [{ platform: "GoogleDrive", folder_id: "f", share_scope: "inherit" } as never],
+      attrs: ATTRS,
+      actorState: {} as never,
+      creds: {} as never,
+      sourceUrlFor: () => "https://example.test/src.mp4",
+      onEvent: () => {},
+    });
+    expect(sentAttrs.find(a => a.platform === "GoogleDrive")?.visibility).toBeUndefined();
   });
 });
