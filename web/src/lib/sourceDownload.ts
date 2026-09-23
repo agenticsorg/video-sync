@@ -30,6 +30,75 @@ async function streamToFile(response: Response, filePath: string): Promise<void>
   await pipeline(nodeStream, createWriteStream(filePath));
 }
 
+/**
+ * Refuse a response that is plainly a web page rather than media.
+ *
+ * Incident 2026-09-23: a Drive-sourced record's `download_url` is a
+ * Drive *viewer* URL, which fell through to the generic https branch
+ * below. Drive answers it with `200 OK` and 80 KB of HTML, so the
+ * `!res.ok` guard never fired — the viewer page was streamed to disk
+ * and uploaded to YouTube as the video. YouTube allocated an id, failed
+ * processing, and removed it. Every Drive record ever published this
+ * way produced a dead video, and nothing anywhere said so.
+ *
+ * A 200 is not evidence that a body is media. This is the cheap check
+ * that turns that silent corruption into an error.
+ */
+function rejectHtmlBody(res: Response, downloadUrl: string): void {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (/^\s*text\/html/i.test(contentType)) {
+    throw new Error(
+      `Source URL returned an HTML page, not media (content-type: ${contentType}). ` +
+      `This usually means the URL points at a viewer page rather than the file itself: ${downloadUrl.slice(0, 80)}`,
+    );
+  }
+}
+
+/** Drive file id out of any of the URL shapes we store, or null. */
+export function extractDriveFileId(downloadUrl: string): string | null {
+  if (downloadUrl.startsWith("drive://")) {
+    const id = downloadUrl.slice("drive://".length).trim();
+    return /^[A-Za-z0-9_-]{10,}$/.test(id) ? id : null;
+  }
+  let m = downloadUrl.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]{10,})/i);
+  if (m) return m[1];
+  m = downloadUrl.match(/drive\.google\.com\/(?:open|uc)\?[^"']*id=([A-Za-z0-9_-]{10,})/i);
+  if (m) return m[1];
+  return null;
+}
+
+/**
+ * Download a Drive file through the API, which is the only way to get
+ * the bytes — the `/view` URL a record stores is a viewer page.
+ *
+ * Authenticates as the Cloud Run runtime service account at
+ * `drive.readonly`, the same identity ADR-071's ingest uses, so
+ * anything the app could import it can also publish.
+ */
+async function downloadDriveToFile(fileId: string, outPath: string): Promise<void> {
+  const { GoogleAuth } = await import("google-auth-library");
+  const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
+  const client = await auth.getClient();
+  const token = (await client.getAccessToken()).token;
+  if (!token) throw new Error("Could not mint a Drive token for the service account");
+
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`
+            + `?alt=media&supportsAllDrives=true`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(
+      `Drive download failed (${res.status}) for file ${fileId}`
+      + (res.status === 403 || res.status === 404
+        ? " — the runtime service account can't read it. Share the file or its folder with the service account."
+        : `: ${detail.slice(0, 200)}`),
+    );
+  }
+  // Belt and braces: an auth redirect or interstitial would be HTML.
+  rejectHtmlBody(res, `drive://${fileId}`);
+  await streamToFile(res, outPath);
+}
+
 async function getZoomAccessToken(accountId: string, clientId: string, clientSecret: string): Promise<string> {
   const tokenUrl = `https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${encodeURIComponent(accountId)}`;
   const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
@@ -143,9 +212,19 @@ export async function downloadFromSource(downloadUrl: string, creds: SourceCreds
   if (loomId) {
     return downloadLoomToFile(loomId, outPath);
   }
+  // Drive must be matched BEFORE the generic https branch: a Drive
+  // record's download_url is an ordinary https URL, so the fallback
+  // would happily fetch the viewer page. ADR-071 §3 intended
+  // download_url to be the ingested copy; it never was, and the
+  // mismatch went unnoticed because Drive answers the viewer URL 200.
+  const driveId = extractDriveFileId(downloadUrl);
+  if (driveId) {
+    return downloadDriveToFile(driveId, outPath);
+  }
   if (downloadUrl.startsWith("http://") || downloadUrl.startsWith("https://")) {
     const dlRes = await fetch(downloadUrl);
     if (!dlRes.ok) throw new Error(`Source download failed (${dlRes.status})`);
+    rejectHtmlBody(dlRes, downloadUrl);
     return streamToFile(dlRes, outPath);
   }
   throw new Error(`Unsupported source URL scheme: ${downloadUrl.slice(0, 40)}`);
