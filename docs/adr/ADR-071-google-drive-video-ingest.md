@@ -94,7 +94,7 @@ This keeps the contributor's submission in the catalog immediately (so they see 
 - **Filename**: `<record-id>.<ext>` where `<ext>` is derived from Drive's `name` (`.mp4`, `.mov`, `.webm`, `.mkv`). If the name has no extension, fall back to `.mp4` (Drive's most common video mimeType is `video/mp4`).
 - **Concurrency**: one ingest at a time per record; a second POST to the same `record_id` returns `409 Conflict`. The client re-queries `/api/drive/status?record_id=<id>` for progress (percent copied, bytes total).
 - **Timeout / resumption**: Cloud Run's request timeout is 60 minutes (default). Files that stream longer than that fail; the client sees a persistent error and can retry (idempotent — the partial file gets truncated on the retry). Files >10 GB should probably be split by the contributor; we don't attempt chunked / resumable ingest in this ADR (deferred).
-- **Bucket versioning**: the bucket already has GCS Object Versioning enabled (ADR-042 §5). Overwriting `<record-id>.mp4` on a re-pull retains the old version — cheap safety-net against a bad re-pull.
+- **Bucket versioning**: the bucket already has GCS Object Versioning enabled (ADR-042 §5). Overwriting `<record-id>.mp4` on a re-pull retains the old version — cheap safety-net against a bad re-pull. *(This was not true when written — see the Addendum below. Versioning was enabled 2026-09-23.)*
 
 The `WasmVideoRecord` gets:
 
@@ -168,3 +168,39 @@ Drive API v3 shares the org's overall Workspace quota (10,000 QPS for `files.get
 - Should the "Drive pending pull" curator queue emit a Discord notification, or is /maintain visibility enough? (Leaning: /maintain badge count for MVP; Discord ping can be added later.)
 - Do we accept Google Drive Shared Drives (`supportsAllDrives=true`) or restrict to My Drive? Shared Drives are cleaner for org content but require the operator's OAuth to be a Shared Drive member. Leaning: accept, since the flag adds it for free.
 - Should the ingest also record a hash (`md5Checksum` from Drive) so a re-pull of the same file bytes is a no-op? Marginal, but cheap.
+
+---
+
+## Addendum: Bucket Versioning Was Never Actually Enabled (2026-09-23)
+
+**Addendum to**: §3's bucket-versioning claim.
+
+§3 above states that `video-sync-data-agentics-487016` "already has GCS Object Versioning enabled (ADR-042 §5)". Both halves were wrong:
+
+- **Versioning was off.** Checked 2026-09-23: `versioning_enabled` was unset, and `catalog.json` had exactly one generation.
+- **ADR-042 §5 does not exist.** That ADR has no numbered sections, and nothing in it concerns bucket configuration. The citation pointed at nothing.
+
+The claim was written as an assumption about infrastructure and never verified against it, which is the failure mode worth naming: an ADR asserting a fact about the deployed world reads exactly like an ADR asserting a decision, and only one of those is true by construction.
+
+### What it cost
+
+On 2026-09-23 a gcsfuse stale-handle error caused `catalog.json` to be rewritten from 197 records to 1 (see the `fix(catalog)` commit of that date). The documented recovery path — roll back to the prior generation — did not exist. Recovery instead depended on an ad-hoc snapshot that happened to have been taken eight minutes earlier, plus the browser's `localStorage` copy. Neither is a safety net; both were luck.
+
+### What changed
+
+Versioning is now enabled on the bucket:
+
+```bash
+gcloud storage buckets update gs://video-sync-data-agentics-487016 --versioning
+```
+
+§3's reasoning about a re-pull retaining the previous `<record-id>.mp4` is therefore true from this date, and was not true for any ingest before it.
+
+### Still open — noncurrent-version retention
+
+There is no lifecycle rule, so noncurrent versions accumulate indefinitely. Two very different profiles share this bucket:
+
+- **`catalog.json`** — ~520 KB, rewritten on every batched push. Frequent small versions; the bulk of the version count.
+- **Video binaries** — hundreds of MB each, overwritten only on a re-pull. Rare, but each version is expensive. The bucket is already ~7.5 GB, almost all video.
+
+A rule deleting noncurrent versions after 30 days would bound the tail while keeping a recovery window far longer than the minutes that mattered here. Not applied yet: it deletes data, so it wants an explicit decision rather than arriving alongside an incident fix.
