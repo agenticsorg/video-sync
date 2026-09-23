@@ -97,12 +97,17 @@ function dateTag(recordedAt: string | null | undefined): string {
 /**
  * Record a destination that landed.
  *
+ * Exported because the per-platform side-publish handlers (Kaltura,
+ * YouTube-only, Drive) need exactly this and used to carry their own
+ * copy. Two implementations of "record a destination" can drift, and
+ * drift in this specific pair is what produced the 2026-09-23 incident.
+ *
  * Returns false when the aggregate refused the command and we fell back
  * to a bare location edit — the caller's event line distinguishes the
  * two, because "recorded as an outcome" and "recorded as a location"
  * mean different things to ADR-077's completeness checks.
  */
-function recordPushed(
+export function recordPushed(
   record: VideoRecordJSON,
   actorState: ActorState,
   platform: OutcomePlatform,
@@ -149,7 +154,7 @@ function recordPushed(
  * is_fully_published() and missing_destinations(), both computed from
  * destination_outcomes, saw nothing outstanding.
  */
-function recordFailed(
+export function recordFailed(
   record: VideoRecordJSON,
   actorState: ActorState,
   platform: OutcomePlatform,

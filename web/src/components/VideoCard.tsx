@@ -41,7 +41,7 @@ import { resolveContributingAccount } from "../lib/contributingAccount";
 import { resolveDestinations, destinationLabel, isAutomatedDestination, appliesDeclaredVisibility, withPreviewVisibilityOverride } from "../lib/destinationResolver";
 import { withProvenanceFooter, recordProvenanceParts } from "../lib/publish/provenanceFooter";
 import { executePublish } from "../lib/publish/execute";
-import { advanceToPublished } from "../lib/publish/advance";
+import { advanceToPublished, recordPushed, recordFailed } from "../lib/publish/advance";
 import { extractDriveFolderId } from "../lib/publish/driveFolderId";
 import type { PublishCredentials } from "../lib/publish/types";
 import type { DestinationSpec } from "../lib/youtubeTitleAlign";
@@ -1322,69 +1322,29 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
    * activity log distinguishes "published to Kaltura" from "Kaltura
    * destination attached".
    */
-  /**
-   * Record that a declared destination did NOT land.
-   *
-   * Deliberately not folded into recordDestinationOutcome: that one
-   * falls back to `add_location(role: "Destination")` when the aggregate
-   * rejects the command, which would be actively wrong here — a failed
-   * push must never leave a Destination location claiming the video is
-   * on that platform.
-   *
-   * The aggregate creates the outcome if the destination was never
-   * declared, so an ad-hoc target that fails is still recorded.
-   */
-  function recordDestinationFailure(
-    platform: "YouTube" | "Kaltura" | "GoogleDrive",
-    error: string,
-  ): void {
-    // record_destination_result is only legal from Publishing/Published.
-    if (video.status !== "Publishing" && video.status !== "Published") return;
-    try {
-      videoStore.mutate(video.id, (r) =>
-        r.recordDestinationResult(cmd({ platform, error })),
-      );
-    } catch (err) {
-      // Best-effort: the event-log line above is still written, and the
-      // publish flow must not abort because bookkeeping was refused.
-      onEvent(
-        `DestinationFailureUnrecorded: "${video.title}" — could not record ${platform} failure on the record: ${err instanceof Error ? err.message : String(err)}`,
-        { video_id: video.id },
-      );
-    }
-  }
-
+  // ADR-079 §1 follow-up — these were duplicated: the card carried its
+  // own copy of the same two helpers the extracted pipeline uses. Two
+  // implementations of "record a destination outcome" can drift, and
+  // drift in exactly this pair is what produced the 2026-09-23
+  // half-publish. One implementation now, wrapped here only to bind the
+  // record and actor the side-publish handlers already have in scope.
+  // Function declarations, not const arrows: these are called from
+  // handlers defined ABOVE this point, and the originals were hoisted.
+  // A const would put them in the temporal dead zone for anything that
+  // ran during render rather than after it.
   function recordDestinationOutcome(
     platform: "YouTube" | "Kaltura" | "GoogleDrive",
     externalId: string,
     externalUrl: string,
   ): boolean {
-    const canRecord = video.status === "Publishing" || video.status === "Published";
-    if (canRecord) {
-      try {
-        videoStore.mutate(video.id, (r) =>
-          r.recordDestinationResult(cmd({
-            platform,
-            external_id: externalId,
-            external_url: externalUrl,
-          })),
-        );
-        return true;
-      } catch {
-        // Fall through to the location edit rather than losing the
-        // destination entirely — a rejected command must not mean the
-        // operator's successful upload goes unrecorded.
-      }
-    }
-    videoStore.mutate(video.id, (r) =>
-      r.add_location(cmd({
-        platform,
-        external_id: externalId,
-        external_url: externalUrl,
-        role: "Destination",
-      })),
-    );
-    return false;
+    return recordPushed(video, actorState, platform, externalId, externalUrl);
+  }
+
+  function recordDestinationFailure(
+    platform: "YouTube" | "Kaltura" | "GoogleDrive",
+    error: string,
+  ): void {
+    recordFailed(video, actorState, platform, error, onEvent);
   }
 
   async function publishToDriveFolder(folderIdOrUrl: string, shareScope: string) {
