@@ -3,7 +3,7 @@ import { promises as fs } from "fs";
 import { join } from "path";
 import { withRequestLogging, serverLog } from "../../../lib/serverLogger";
 import { getActor } from "../../../lib/auth";
-import { readCatalog, writeCatalog, withLock, type CatalogStore } from "../../../lib/catalogStore";
+import { readCatalog, writeCatalog, withLock, CatalogUnavailableError, type CatalogStore } from "../../../lib/catalogStore";
 
 // ADR-035 Level 2 — server-side catalog. Records persisted as
 // WASM-serialised JSON strings, keyed by record id, with a sidecar
@@ -92,7 +92,19 @@ async function postHandler(req: NextRequest) {
     validated.push({ id: it.id, json: it.json, ts: it.lastModified ?? new Date().toISOString() });
   }
   return withLock(async () => {
-    const current = await readCatalog();
+    let current: CatalogStore;
+    try {
+      current = await readCatalog();
+    } catch (err) {
+      // Incident 2026-09-23 — the old behaviour here was to merge onto
+      // an empty store and write, which truncated 197 records to 1.
+      // Refusing the write loses this push; the client re-pushes on its
+      // next sync. That is the trade we want.
+      if (err instanceof CatalogUnavailableError) {
+        return NextResponse.json({ error: err.message, retryable: true }, { status: 503 });
+      }
+      throw err;
+    }
     for (const v of validated) {
       current.records[v.id] = v.json;
       current.lastModified[v.id] = v.ts;
@@ -108,7 +120,15 @@ async function deleteHandler(req: NextRequest) {
     return NextResponse.json({ error: "id query param required" }, { status: 400 });
   }
   return withLock(async () => {
-    const current = await readCatalog();
+    let current: CatalogStore;
+    try {
+      current = await readCatalog();
+    } catch (err) {
+      if (err instanceof CatalogUnavailableError) {
+        return NextResponse.json({ error: err.message, retryable: true }, { status: 503 });
+      }
+      throw err;
+    }
     delete current.records[id];
     delete current.lastModified[id];
     await writeCatalog(current);

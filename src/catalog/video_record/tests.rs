@@ -1820,3 +1820,86 @@ fn test_every_description_source_round_trips_as_a_bare_string() {
         assert_eq!(back, variant);
     }
 }
+
+/// Incident 2026-09-23 — the client recorded only the successful
+/// destination, so a record with two declared destinations ended up
+/// holding one Pushed outcome and nothing else. `is_fully_published`
+/// and `missing_destinations` are both computed from the outcomes, so
+/// the record read as completely published while YouTube had never
+/// happened.
+///
+/// The aggregate was always able to express this; the client just
+/// didn't call it. These pin the behaviour the fix depends on.
+#[test]
+fn test_recording_a_failure_after_publish_reopens_the_gap() {
+    let mut rec = approved_record();
+    rec.begin_publish(BeginPublish {
+        actor: admin_actor(),
+        destinations: vec![
+            declared(Platform::YouTube, "public"),
+            declared(Platform::Kaltura, "public"),
+        ],
+    })
+    .unwrap();
+    // Only the success is recorded — the pre-fix client's behaviour.
+    rec.record_destination_result(success(Platform::Kaltura, "1_gwm622in")).unwrap();
+    assert_eq!(rec.status, VideoStatus::Published);
+
+    // The repair: record the failure that was dropped on the floor.
+    let events = rec
+        .record_destination_result(failure(Platform::YouTube, "invalid_grant"))
+        .unwrap();
+
+    // Still Published — a partial publish IS Published — but no longer
+    // claiming to be complete.
+    assert_eq!(rec.status, VideoStatus::Published);
+    assert!(!rec.is_fully_published());
+    assert_eq!(rec.missing_destinations(), vec![Platform::YouTube]);
+    assert!(events.iter().any(|e| matches!(e, CatalogEvent::DestinationFailed(_))));
+}
+
+#[test]
+fn test_a_failure_for_an_undeclared_destination_is_still_recorded() {
+    // begin_publish never mentioned YouTube; the operator pushed there
+    // ad hoc and it failed. The outcome must still land, or the failure
+    // is invisible for the same reason the incident was.
+    let mut rec = approved_record();
+    rec.begin_publish(BeginPublish {
+        actor: admin_actor(),
+        destinations: vec![declared(Platform::Kaltura, "public")],
+    })
+    .unwrap();
+    rec.record_destination_result(success(Platform::Kaltura, "kal-1")).unwrap();
+
+    rec.record_destination_result(failure(Platform::YouTube, "invalid_grant")).unwrap();
+
+    let yt = rec
+        .destination_outcomes
+        .iter()
+        .find(|o| o.platform == Platform::YouTube)
+        .expect("undeclared destination still gets an outcome");
+    assert_eq!(yt.state, OutcomeState::Failed);
+    assert_eq!(yt.error.as_deref(), Some("invalid_grant"));
+}
+
+#[test]
+fn test_a_failed_destination_adds_no_destination_location() {
+    // The record must not claim the video is on a platform the push
+    // never reached — that is why the client's failure path can't reuse
+    // the add_location fallback.
+    let mut rec = approved_record();
+    rec.begin_publish(BeginPublish {
+        actor: admin_actor(),
+        destinations: vec![declared(Platform::YouTube, "public")],
+    })
+    .unwrap();
+
+    rec.record_destination_result(failure(Platform::YouTube, "invalid_grant")).unwrap();
+
+    let youtube_destinations = rec
+        .locations
+        .iter()
+        .filter(|l| l.platform == Platform::YouTube && l.role == LocationRole::Destination)
+        .count();
+    assert_eq!(youtube_destinations, 0);
+}

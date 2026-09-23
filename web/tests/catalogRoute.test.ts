@@ -135,3 +135,141 @@ describe("catalog/route readCatalog — shape guard (incident 2026-06-07)", () =
     expect(written.records["xyz-record"]).toBeTruthy();
   });
 });
+
+/**
+ * Incident 2026-09-23 — catalog truncated from 197 records to 1.
+ *
+ * gcsfuse threw `ReadFile: stale file handle … catalog.json was modified
+ * or deleted by another process`. readCatalog's bare catch turned that
+ * into an empty store, the in-flight POST merged one record onto it, and
+ * writeCatalog persisted the result. Two seconds, no error, 196 records
+ * gone.
+ *
+ * The rule these lock in: a FAILED read must never be indistinguishable
+ * from an EMPTY catalog on any path that then writes.
+ */
+describe("catalog write path — never merge onto a failed read (incident 2026-09-23)", () => {
+  const POPULATED = JSON.stringify({
+    records: { a: '{"id":"a"}', b: '{"id":"b"}', c: '{"id":"c"}' },
+    lastModified: { a: "2026-09-23T12:00:00Z", b: "2026-09-23T12:00:00Z", c: "2026-09-23T12:00:00Z" },
+  });
+
+  function errno(code: string): NodeJS.ErrnoException {
+    const e = new Error(`simulated ${code}`) as NodeJS.ErrnoException;
+    e.code = code;
+    return e;
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    process.env.ALLOW_NO_IAP = "1";
+  });
+
+  afterEach(() => {
+    delete process.env.ALLOW_NO_IAP;
+  });
+
+  it("REFUSES the write and never calls writeFile when the read fails", async () => {
+    // Both the initial read and the retry fail.
+    vi.spyOn(fs, "readFile").mockRejectedValue(errno("ESTALE"));
+    const write = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+
+    const mod = await importRoute();
+    const res = await mod.POST(makePostReq({ id: "x", json: '{"id":"x"}' }) as never);
+
+    expect(res.status).toBe(503);
+    // The assertion that matters: nothing was persisted.
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES the write when the file is unparseable (a torn read)", async () => {
+    vi.spyOn(fs, "readFile").mockResolvedValue('{"records": {"a": "trunc');
+    const write = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+
+    const mod = await importRoute();
+    const res = await mod.POST(makePostReq({ id: "x", json: '{"id":"x"}' }) as never);
+
+    expect(res.status).toBe(503);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("retries once before giving up — a stale handle usually clears", async () => {
+    const read = vi.spyOn(fs, "readFile")
+      .mockRejectedValueOnce(errno("ESTALE"))
+      .mockResolvedValueOnce(POPULATED);
+    const write = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+
+    const mod = await importRoute();
+    const res = await mod.POST(makePostReq({ id: "x", json: '{"id":"x"}' }) as never);
+
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+    // All three prior records survived the merge, plus the new one.
+    const persisted = JSON.parse((write.mock.calls[0][1] as string));
+    expect(Object.keys(persisted.records).sort()).toEqual(["a", "b", "c", "x"]);
+  });
+
+  it("still writes normally when the read succeeds", async () => {
+    vi.spyOn(fs, "readFile").mockResolvedValue(POPULATED);
+    const write = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+
+    const mod = await importRoute();
+    const res = await mod.POST(makePostReq({ id: "x", json: '{"id":"x"}' }) as never);
+
+    expect(res.status).toBe(200);
+    const persisted = JSON.parse((write.mock.calls[0][1] as string));
+    expect(Object.keys(persisted.records)).toHaveLength(4);
+  });
+
+  it("lets a genuinely fresh deployment start empty (ENOENT, nothing seen yet)", async () => {
+    vi.spyOn(fs, "readFile").mockRejectedValue(errno("ENOENT"));
+    const write = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+
+    const mod = await importRoute();
+    const res = await mod.POST(makePostReq({ id: "x", json: '{"id":"x"}' }) as never);
+
+    expect(res.status).toBe(200);
+    const persisted = JSON.parse((write.mock.calls[0][1] as string));
+    expect(Object.keys(persisted.records)).toEqual(["x"]);
+  });
+
+  it("treats ENOENT as a FAILURE once records have been seen", async () => {
+    // This is the gcsfuse case: `gcs.NotFoundError: storage: object
+    // doesn't exist` can reach us as ENOENT, and after a populated read
+    // it means the object was lost, not that the deployment is new.
+    const mod = await importRoute();
+    const store = await import("../src/lib/catalogStore");
+
+    vi.spyOn(fs, "readFile").mockResolvedValueOnce(POPULATED);
+    await store.readCatalog();               // latch: we have seen records
+
+    vi.spyOn(fs, "readFile").mockRejectedValue(errno("ENOENT"));
+    const write = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+
+    const res = await mod.POST(makePostReq({ id: "x", json: '{"id":"x"}' }) as never);
+
+    expect(res.status).toBe(503);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("refuses a DELETE against an unreadable catalog too", async () => {
+    // Delete-from-empty-then-write persists the truncation just as
+    // effectively as the POST path did.
+    vi.spyOn(fs, "readFile").mockRejectedValue(errno("EIO"));
+    const write = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+
+    const mod = await importRoute();
+    const req = new Request("https://example.com/api/catalog?id=a", { method: "DELETE" });
+    const res = await mod.DELETE(req as never);
+
+    expect(res.status).toBe(503);
+    expect(write).not.toHaveBeenCalled();
+  });
+});
