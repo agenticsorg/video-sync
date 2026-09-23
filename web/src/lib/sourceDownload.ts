@@ -20,6 +20,8 @@ export interface SourceCreds {
   zoomClientSecret?: string;
   firefliesApiKey?: string;
   ytCookies?: string;
+  kalturaPartnerId?: string;
+  kalturaAdminSecret?: string;
 }
 
 /** Stream a fetch response body to a file on disk. */
@@ -44,9 +46,12 @@ async function streamToFile(response: Response, filePath: string): Promise<void>
  * A 200 is not evidence that a body is media. This is the cheap check
  * that turns that silent corruption into an error.
  */
-function rejectHtmlBody(res: Response, downloadUrl: string): void {
+function rejectNonMediaBody(res: Response, downloadUrl: string): void {
   const contentType = res.headers.get("content-type") ?? "";
-  if (/^\s*text\/html/i.test(contentType)) {
+  // application/xml comes from Kaltura's error responses; its own
+  // downloader has rejected it since before this guard existed, and the
+  // reason was never Kaltura-specific.
+  if (/^\s*(text\/html|application\/xml)/i.test(contentType)) {
     throw new Error(
       `Source URL returned an HTML page, not media (content-type: ${contentType}). ` +
       `This usually means the URL points at a viewer page rather than the file itself: ${downloadUrl.slice(0, 80)}`,
@@ -95,8 +100,50 @@ async function downloadDriveToFile(fileId: string, outPath: string): Promise<voi
     );
   }
   // Belt and braces: an auth redirect or interstitial would be HTML.
-  rejectHtmlBody(res, `drive://${fileId}`);
+  rejectNonMediaBody(res, `drive://${fileId}`);
   await streamToFile(res, outPath);
+}
+
+/**
+ * Download a Kaltura entry via an admin session.
+ *
+ * Moved here from /api/youtube/upload, which carried its own copy of
+ * this and six other downloaders. That duplication is why the Drive fix
+ * of 2026-09-23 missed the YouTube publish path entirely: the fix
+ * landed on this module and the upload route never called it.
+ */
+async function downloadKalturaToFile(entryId: string, creds: SourceCreds, outPath: string): Promise<void> {
+  const { kalturaPartnerId: partnerId, kalturaAdminSecret: adminSecret } = creds;
+  if (!partnerId || !adminSecret) {
+    throw new Error("Kaltura credentials required for kaltura:// download");
+  }
+  // Mint an admin Kaltura Session (KS) so the download URL is authorized.
+  const sessForm = new URLSearchParams();
+  sessForm.set("format", "1"); // JSON
+  sessForm.set("partnerId", partnerId);
+  sessForm.set("secret", adminSecret);
+  sessForm.set("type", "2"); // ADMIN
+  sessForm.set("userId", "video-sync");
+  sessForm.set("expiry", "3600");
+  const sessRes = await fetch("https://www.kaltura.com/api_v3/?service=session&action=start", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: sessForm,
+  });
+  if (!sessRes.ok) throw new Error(`Kaltura session.start HTTP ${sessRes.status}`);
+  const sessJson = await sessRes.json();
+  const ks: string = typeof sessJson === "string" ? sessJson : (sessJson?.result ?? "");
+  if (!ks || ks.length < 10) {
+    throw new Error(`Kaltura session.start returned no usable KS: ${JSON.stringify(sessJson).slice(0, 120)}`);
+  }
+
+  // playManifest "format/download" serves the source/highest flavor as a
+  // direct file. The KS authorizes access to the entry.
+  const url = `https://cdnapisec.kaltura.com/p/${partnerId}/sp/${partnerId}00/playManifest/entryId/${entryId}/format/download/protocol/https/ks/${ks}`;
+  const dlRes = await fetch(url, { redirect: "follow" });
+  if (!dlRes.ok) throw new Error(`Kaltura download failed (${dlRes.status}) for entry ${entryId}`);
+  rejectNonMediaBody(dlRes, `kaltura://entry/${entryId}`);
+  await streamToFile(dlRes, outPath);
 }
 
 async function getZoomAccessToken(accountId: string, clientId: string, clientSecret: string): Promise<string> {
@@ -205,6 +252,9 @@ export async function downloadFromSource(downloadUrl: string, creds: SourceCreds
     if (!creds.firefliesApiKey) throw new Error("Fireflies API key required for fireflies:// download");
     return downloadFirefliesToFile(downloadUrl.slice("fireflies://".length), creds.firefliesApiKey, outPath);
   }
+  if (downloadUrl.startsWith("kaltura://entry/")) {
+    return downloadKalturaToFile(downloadUrl.slice("kaltura://entry/".length), creds, outPath);
+  }
   if (downloadUrl.startsWith("youtube://")) {
     return downloadYouTubeToFile(downloadUrl.slice("youtube://".length), outPath, creds.ytCookies);
   }
@@ -224,7 +274,7 @@ export async function downloadFromSource(downloadUrl: string, creds: SourceCreds
   if (downloadUrl.startsWith("http://") || downloadUrl.startsWith("https://")) {
     const dlRes = await fetch(downloadUrl);
     if (!dlRes.ok) throw new Error(`Source download failed (${dlRes.status})`);
-    rejectHtmlBody(dlRes, downloadUrl);
+    rejectNonMediaBody(dlRes, downloadUrl);
     return streamToFile(dlRes, outPath);
   }
   throw new Error(`Unsupported source URL scheme: ${downloadUrl.slice(0, 40)}`);

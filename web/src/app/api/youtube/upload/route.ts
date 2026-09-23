@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
+import { downloadFromSource } from "../../../../lib/sourceDownload";
+
+/** Smallest plausible recording. A Drive viewer page is ~80 KB; the two
+ *  videos killed on 2026-09-23 were 80085 and 80155 bytes. */
+const MIN_PLAUSIBLE_MEDIA_BYTES = 512 * 1024;
 import { execFile } from "child_process";
-import { createWriteStream, createReadStream } from "fs";
+import { createReadStream } from "fs";
 import { promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 
 interface UploadRequest {
@@ -33,240 +37,6 @@ interface UploadRequest {
   kalturaAdminSecret?: string;
   // YouTube cookies in Netscape format (needed to bypass bot detection)
   ytCookies?: string;
-}
-
-async function getZoomAccessToken(accountId: string, clientId: string, clientSecret: string): Promise<string> {
-  const tokenUrl = `https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${encodeURIComponent(accountId)}`;
-  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-
-  const res = await fetch(tokenUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Zoom token error (${res.status}): ${text}`);
-  }
-
-  const data = await res.json();
-  return data.access_token;
-}
-
-/** Stream a fetch response body to a file on disk. */
-async function streamToFile(response: Response, filePath: string): Promise<void> {
-  if (!response.body) throw new Error("Response has no body");
-  const webStream = response.body as ReadableStream<Uint8Array>;
-  const nodeStream = Readable.fromWeb(webStream as Parameters<typeof Readable.fromWeb>[0]);
-  await pipeline(nodeStream, createWriteStream(filePath));
-}
-
-async function downloadZoomToFile(
-  meetingUuid: string,
-  accountId: string,
-  clientId: string,
-  clientSecret: string,
-  outPath: string,
-): Promise<void> {
-  const zoomToken = await getZoomAccessToken(accountId, clientId, clientSecret);
-
-  // Zoom UUIDs containing / or // must be double-URL-encoded
-  const encodedUuid = meetingUuid.includes("/")
-    ? encodeURIComponent(encodeURIComponent(meetingUuid))
-    : encodeURIComponent(meetingUuid);
-
-  // Get recording files for this meeting instance
-  const recRes = await fetch(
-    `https://api.zoom.us/v2/meetings/${encodedUuid}/recordings`,
-    { headers: { Authorization: `Bearer ${zoomToken}` } },
-  );
-
-  if (!recRes.ok) {
-    const text = await recRes.text();
-    throw new Error(`Zoom recordings API error (${recRes.status}): ${text}`);
-  }
-
-  const recData = await recRes.json();
-  const files = recData.recording_files ?? [];
-
-  // Find the MP4 file
-  const mp4 = files.find(
-    (f: { file_type: string; status: string }) =>
-      f.file_type === "MP4" && f.status === "completed",
-  );
-
-  if (!mp4?.download_url) {
-    throw new Error("No completed MP4 recording file found for this meeting");
-  }
-
-  // Stream the video file to disk (Zoom requires access_token query param)
-  const videoUrl = `${mp4.download_url}?access_token=${zoomToken}`;
-  const dlRes = await fetch(videoUrl);
-
-  if (!dlRes.ok) {
-    throw new Error(`Zoom video download failed (${dlRes.status})`);
-  }
-
-  await streamToFile(dlRes, outPath);
-}
-
-function extractLoomVideoId(url: string): string | null {
-  const match = url.match(/loom\.com\/(?:share|v)\/([a-f0-9]+)/i);
-  return match ? match[1] : null;
-}
-
-async function downloadLoomToFile(videoId: string, outPath: string): Promise<void> {
-  // yt-dlp handles Loom's Apollo-state extraction, MP4 vs HLS fallback,
-  // and CloudFront-signed chunk downloads. The previous inline scraper
-  // shelled out to ffmpeg for HLS, which silently failed on long videos
-  // (empty stderr at -loglevel error masked the actual cause). yt-dlp is
-  // already in the runtime image (Dockerfile installs ffmpeg + yt-dlp)
-  // and is the canonical path used by lib/sourceDownload.ts.
-  const url = `https://www.loom.com/share/${videoId}`;
-  await new Promise<void>((resolve, reject) => {
-    execFile(
-      "yt-dlp",
-      ["--output", outPath, "--no-playlist", "--no-warnings", "--newline", url],
-      { timeout: 3600000, maxBuffer: 16 * 1024 * 1024 },
-      (err, _stdout, stderr) => {
-        if (err) {
-          if (err.message.includes("ENOENT")) {
-            reject(new Error("yt-dlp is not installed."));
-          } else {
-            const detail = (stderr || "").trim() || err.message;
-            reject(new Error(`Loom download failed: ${detail.slice(0, 1500)}`));
-          }
-        } else {
-          resolve();
-        }
-      },
-    );
-  });
-}
-
-async function downloadYouTubeToFile(videoId: string, outPath: string, cookies?: string): Promise<void> {
-  const url = `https://www.youtube.com/watch?v=${videoId}`;
-
-  // Write cookies to a temp file if provided
-  let cookiesPath: string | null = null;
-  if (cookies?.trim()) {
-    cookiesPath = join(tmpdir(), `yt-cookies-${Date.now()}.txt`);
-    await fs.writeFile(cookiesPath, cookies, "utf8");
-  }
-
-  const args = [
-    "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-    "--output", outPath,
-    "--no-playlist",
-    "--quiet",
-    "--no-warnings",
-  ];
-  if (cookiesPath) args.push("--cookies", cookiesPath);
-  args.push(url);
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      execFile("yt-dlp", args, { timeout: 3600000 }, (err, _stdout, stderr) => {
-        if (err) {
-          if (err.message.includes("ENOENT")) {
-            reject(new Error("yt-dlp is not installed. It must be present in the container (ADR-027)."));
-          } else {
-            const detail = (stderr || "").trim() || err.message;
-            reject(new Error(`yt-dlp failed: ${detail.slice(0, 500)}`));
-          }
-        } else {
-          resolve();
-        }
-      });
-    });
-  } finally {
-    if (cookiesPath) fs.unlink(cookiesPath).catch(() => {});
-  }
-}
-
-async function downloadFirefliesToFile(
-  transcriptId: string,
-  apiKey: string,
-  outPath: string,
-): Promise<void> {
-  // Re-query Fireflies GraphQL to get a fresh, non-expired video URL.
-  const query = `
-    query GetTranscript($id: String!) {
-      transcript(id: $id) {
-        video_url
-        audio_url
-      }
-    }
-  `;
-  const res = await fetch("https://api.fireflies.ai/graphql", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query, variables: { id: transcriptId } }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Fireflies API error (${res.status})`);
-  }
-
-  const json = await res.json();
-  if (json.errors?.length) {
-    throw new Error(`Fireflies GraphQL error: ${json.errors[0]?.message}`);
-  }
-
-  const t = json.data?.transcript;
-  const videoUrl: string | null = t?.video_url || t?.audio_url || null;
-  if (!videoUrl) {
-    throw new Error("Fireflies returned no video or audio URL for this transcript. The recording may not be available.");
-  }
-
-  const dlRes = await fetch(videoUrl);
-  if (!dlRes.ok) {
-    throw new Error(`Fireflies video download failed (${dlRes.status})`);
-  }
-  await streamToFile(dlRes, outPath);
-}
-
-async function downloadKalturaToFile(
-  entryId: string,
-  partnerId: string,
-  adminSecret: string,
-  outPath: string,
-): Promise<void> {
-  // 1. Mint an admin Kaltura Session (KS) so the download URL is authorized.
-  const sessForm = new URLSearchParams();
-  sessForm.set("format", "1"); // JSON
-  sessForm.set("partnerId", partnerId);
-  sessForm.set("secret", adminSecret);
-  sessForm.set("type", "2"); // ADMIN
-  sessForm.set("userId", "video-sync");
-  sessForm.set("expiry", "3600");
-  const sessRes = await fetch("https://www.kaltura.com/api_v3/?service=session&action=start", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: sessForm,
-  });
-  if (!sessRes.ok) throw new Error(`Kaltura session.start HTTP ${sessRes.status}`);
-  const sessJson = await sessRes.json();
-  const ks: string = typeof sessJson === "string" ? sessJson : (sessJson?.result ?? "");
-  if (!ks || ks.length < 10) throw new Error(`Kaltura session.start returned no usable KS: ${JSON.stringify(sessJson).slice(0, 120)}`);
-
-  // 2. playManifest "format/download" serves the source/highest flavor as a
-  //    direct file. The KS authorizes access to the entry.
-  const downloadUrl = `https://cdnapisec.kaltura.com/p/${partnerId}/sp/${partnerId}00/playManifest/entryId/${entryId}/format/download/protocol/https/ks/${ks}`;
-  const dlRes = await fetch(downloadUrl, { redirect: "follow" });
-  if (!dlRes.ok) throw new Error(`Kaltura download failed (${dlRes.status}) for entry ${entryId}`);
-  // Guard against Kaltura returning an HTML error page instead of media.
-  const ctype = dlRes.headers.get("content-type") ?? "";
-  if (ctype.includes("text/html") || ctype.includes("application/xml")) {
-    throw new Error(`Kaltura returned ${ctype} instead of media for entry ${entryId} — entry may not be downloadable or KS lacks permission`);
-  }
-  await streamToFile(dlRes, outPath);
 }
 
 // ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -361,26 +131,31 @@ async function handler(req: NextRequest) {
         send("progress", { phase: "Downloading source video…" });
         serverLog("info", "ext:youtube-upload", "download-start", { title, downloadUrl });
 
-        if (downloadUrl.startsWith("youtube://")) {
-          await downloadYouTubeToFile(downloadUrl.replace("youtube://", ""), tmpPath, body.ytCookies);
-        } else if (downloadUrl.startsWith("zoom://recording/")) {
-          if (!zoomAccountId || !zoomClientId || !zoomClientSecret) throw new Error("Zoom credentials required");
-          await downloadZoomToFile(downloadUrl.replace("zoom://recording/", ""), zoomAccountId, zoomClientId, zoomClientSecret, tmpPath);
-        } else if (downloadUrl.startsWith("fireflies://")) {
-          if (!firefliesApiKey) throw new Error("Fireflies API key required");
-          await downloadFirefliesToFile(downloadUrl.replace("fireflies://", ""), firefliesApiKey, tmpPath);
-        } else if (downloadUrl.startsWith("kaltura://entry/")) {
-          if (!kalturaPartnerId || !kalturaAdminSecret) throw new Error("Kaltura credentials required (shared credential not configured)");
-          await downloadKalturaToFile(downloadUrl.replace("kaltura://entry/", ""), kalturaPartnerId, kalturaAdminSecret, tmpPath);
-        } else {
-          const loomId = extractLoomVideoId(downloadUrl);
-          if (loomId) {
-            await downloadLoomToFile(loomId, tmpPath);
-          } else {
-            const dlRes = await fetch(downloadUrl);
-            if (!dlRes.ok) throw new Error(`Source download failed (${dlRes.status})`);
-            await streamToFile(dlRes, tmpPath);
-          }
+        // ADR-079 follow-up — one downloader for every publish path.
+        //
+        // This route used to carry its own copy of the scheme dispatch
+        // and seven downloaders. On 2026-09-23 the Drive fix landed on
+        // lib/sourceDownload and this route never called it, so two
+        // retries uploaded 80 KB of Drive viewer HTML to YouTube and
+        // both videos were removed. Duplication is why the fix missed.
+        await downloadFromSource(downloadUrl, {
+          zoomAccountId, zoomClientId, zoomClientSecret,
+          firefliesApiKey,
+          ytCookies: body.ytCookies,
+          kalturaPartnerId, kalturaAdminSecret,
+        }, tmpPath);
+
+        // Size is the cheapest possible sanity check, and the one that
+        // would have caught the HTML uploads immediately: 80 KB is not a
+        // recording. Logged unconditionally so a bad publish is legible
+        // in Cloud Logging without reconstructing it from the catalog.
+        const downloadedBytes = (await fs.stat(tmpPath)).size;
+        serverLog("info", "ext:youtube-upload", "download-bytes", { title, downloadedBytes, downloadUrl });
+        if (downloadedBytes < MIN_PLAUSIBLE_MEDIA_BYTES) {
+          throw new Error(
+            `Source download produced only ${downloadedBytes} bytes — too small to be a recording. ` +
+            `Refusing to upload. Source: ${downloadUrl.slice(0, 80)}`,
+          );
         }
         serverLog("info", "ext:youtube-upload", "download-ok", { title });
 

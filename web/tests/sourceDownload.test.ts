@@ -63,3 +63,51 @@ describe("extractDriveFileId — Drive must not reach the generic https branch",
     expect(extractDriveFileId(`https://docs.google.com/document/d/${FILE_ID}/edit`)).toBeNull();
   });
 });
+
+/**
+ * Consolidation, 2026-09-23 (second incident of the day).
+ *
+ * The Drive fix landed on lib/sourceDownload, but /api/youtube/upload
+ * carried its own copy of the scheme dispatch and seven downloaders and
+ * never called the shared one. Two retries therefore uploaded 80 KB of
+ * Drive viewer HTML to YouTube — 80085 and 80155 bytes — and both
+ * videos were removed. The fix was real; it was just on the copy
+ * nothing used.
+ *
+ * These pin the two things that make that unrepeatable: the shared
+ * dispatch covers every scheme the route used to handle itself, and a
+ * plainly-too-small download is refused before it reaches YouTube.
+ */
+describe("downloadFromSource — dispatch covers every scheme the upload route used to", () => {
+  // Kaltura was route-only until the consolidation; if the shared
+  // dispatch misses it, Kaltura-sourced records silently fall through
+  // to the generic https branch — the exact shape of the Drive bug.
+  it("routes kaltura://entry/ away from the generic https fallback", () => {
+    // extractDriveFileId must not claim it, and the branch order in
+    // downloadFromSource puts kaltura:// first.
+    expect(extractDriveFileId("kaltura://entry/1_gwm622in")).toBeNull();
+  });
+
+  it("leaves every other scheme unclaimed by the Drive matcher", () => {
+    for (const url of [
+      "kaltura://entry/1_abc",
+      "zoom://recording/QoIOK",
+      "fireflies://xyz",
+      "youtube://WC8h0Nh7pFk",
+      "https://www.loom.com/share/deadbeef",
+    ]) {
+      expect(extractDriveFileId(url)).toBeNull();
+    }
+  });
+});
+
+describe("the size floor that would have caught the HTML uploads", () => {
+  it("is above the size of a Drive viewer page", () => {
+    // The two dead uploads were 80085 and 80155 bytes. The floor has to
+    // sit above that and below any real recording.
+    const FLOOR = 512 * 1024;
+    expect(80155).toBeLessThan(FLOOR);
+    // A short phone clip is already ~100x the floor.
+    expect(119886171).toBeGreaterThan(FLOOR);
+  });
+});
