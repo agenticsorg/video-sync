@@ -9,8 +9,12 @@
 # Workload Identity Federation, this script is the deploy path.
 #
 # ─── First-time setup (per machine / per devcontainer) ───────────────────
-#   1. gcloud auth login                     # interactive browser login
+#   1. bash scripts/login-gcloud.sh          # logs in only if needed
 #   2. gcloud config set project agentics-487016
+#
+# The deploy runs `scripts/login-gcloud.sh --check` before anything else
+# and aborts on an expired credential, so a stale login fails in one
+# second rather than part-way through a Cloud Build.
 #
 # Your user account must have these roles on the project:
 #   - roles/run.admin
@@ -78,6 +82,16 @@
 set -euo pipefail
 
 cd /workspaces/video-sync
+
+# Auth pre-flight FIRST, because it is the cheapest check and the most
+# likely to fail: this org reauthenticates roughly daily. Finding out
+# after a two-minute type check and a six-minute Cloud Build wastes
+# both, and that is exactly how 2026-09-23 went. --check never prompts
+# and never logs in — it only answers whether the credential works.
+if ! bash scripts/login-gcloud.sh --check; then
+  echo "    Aborting deploy — log in, then re-run ./deploy.sh" >&2
+  exit 1
+fi
 
 # Type-check before docker build. Next.js's in-build worker OOMs in this
 # devcontainer at ~30+ routes; we run tsc separately here so type errors
