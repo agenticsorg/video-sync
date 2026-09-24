@@ -3,6 +3,7 @@ import { serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
 import { downloadFromSource } from "../../../../lib/sourceDownload";
 import { recordUpload } from "../../../../lib/uploadQuota";
+import { stagedPath, discardStaged } from "../../../../lib/mediaStaging";
 
 /** Smallest plausible recording. A Drive viewer page is ~80 KB; the two
  *  videos killed on 2026-09-23 were 80085 and 80155 bytes. */
@@ -10,7 +11,6 @@ const MIN_PLAUSIBLE_MEDIA_BYTES = 512 * 1024;
 import { execFile } from "child_process";
 import { createReadStream } from "fs";
 import { promises as fs } from "fs";
-import { tmpdir } from "os";
 import { join } from "path";
 import { Readable } from "stream";
 
@@ -128,7 +128,16 @@ async function handler(req: NextRequest) {
         serverLog("info", "ext:youtube-upload", "token-refresh-ok", { title });
 
         // Step 2: Download source to temp file
-        tmpPath = join(tmpdir(), `video-upload-${Date.now()}.mp4`);
+        // Stage on the FUSE bucket, not /tmp. /tmp is RAM on Cloud Run,
+        // and these recordings run to several GB — a 4.86 GB download
+        // OOM-killed an 8 GiB instance on 2026-09-24. gcsfuse streams
+        // writes through a 32 MB block budget, so the same file costs
+        // megabytes of memory instead of gigabytes.
+        const staged = await stagedPath("video-upload");
+        tmpPath = staged.path;
+        serverLog("info", "ext:youtube-upload", "staging", {
+          title, onFuse: staged.onFuse, path: tmpPath,
+        });
         send("progress", { phase: "Downloading source video…" });
         serverLog("info", "ext:youtube-upload", "download-start", { title, downloadUrl });
 
@@ -164,7 +173,9 @@ async function handler(req: NextRequest) {
         if (body.trimStartSeconds && body.trimStartSeconds > 0) {
           send("progress", { phase: `Trimming first ${body.trimStartSeconds}s…` });
           serverLog("info", "ext:youtube-upload", "trim-start", { title, trimStartSeconds: body.trimStartSeconds });
-          const trimmedPath = join(tmpdir(), `video-trimmed-${Date.now()}.mp4`);
+          // Same reasoning as the download: the trimmed copy is the
+          // same order of magnitude, and for a moment BOTH exist.
+          const trimmedPath = (await stagedPath("video-trimmed")).path;
           await new Promise<void>((resolve, reject) => {
             execFile(
               "ffmpeg",
@@ -176,7 +187,7 @@ async function handler(req: NextRequest) {
               },
             );
           });
-          fs.unlink(tmpPath).catch(() => {});
+          await discardStaged(tmpPath);
           tmpPath = trimmedPath;
           serverLog("info", "ext:youtube-upload", "trim-ok", { title });
         }
@@ -255,7 +266,7 @@ async function handler(req: NextRequest) {
         serverLog("error", "ext:youtube-upload", "failed", { title, error: message });
         send("error", { message });
       } finally {
-        if (tmpPath) fs.unlink(tmpPath).catch(() => {});
+        await discardStaged(tmpPath);
         controller.close();
       }
     },
