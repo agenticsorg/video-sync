@@ -1,67 +1,40 @@
+/**
+ * GET  /api/backfill/state — the upload-quota snapshot
+ * POST /api/backfill/state — operator correction of the counter
+ *
+ * The accounting itself lives in lib/uploadQuota, which /api/youtube/upload
+ * calls after every successful upload. This route no longer accepts
+ * `{ increment: true }`: until 2026-09-24 BackfillPanel incremented from
+ * the client after its own uploads, which meant backfill runs were
+ * counted and nothing else was. Counting at the upload route covers
+ * every path, and keeping a second incrementer alive would double-count
+ * the backfill ones.
+ */
+
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import { join } from "path";
 import { withRequestLogging } from "../../../../lib/serverLogger";
+import { readQuota, setQuota } from "../../../../lib/uploadQuota";
 
-const STATE_FILE = join(process.cwd(), "data", "backfill-state.json");
-
-interface ServerState {
-  uploads_today: number;
-  last_reset_date: string;
-}
-
-async function readState(): Promise<ServerState> {
-  try {
-    const raw = await fs.readFile(STATE_FILE, "utf-8");
-    return JSON.parse(raw) as ServerState;
-  } catch {
-    return { uploads_today: 0, last_reset_date: "" };
-  }
-}
-
-async function writeState(s: ServerState) {
-  await fs.mkdir(join(process.cwd(), "data"), { recursive: true });
-  await fs.writeFile(STATE_FILE, JSON.stringify(s), "utf-8");
-}
-
-function todayUtc(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function maybeReset(s: ServerState): ServerState {
-  const today = todayUtc();
-  if (s.last_reset_date !== today) {
-    return { uploads_today: 0, last_reset_date: today };
-  }
-  return s;
-}
+export const dynamic = "force-dynamic";
 
 async function getHandler() {
-  const s = maybeReset(await readState());
-  await writeState(s);
-  return NextResponse.json(s);
+  return NextResponse.json(await readQuota());
 }
 
 async function postHandler(req: NextRequest) {
-
-  let body: { increment?: boolean; uploads_today?: number; last_reset_date?: string };
+  let body: { uploads_today?: number; last_reset_date?: string; increment?: boolean };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-
-  const s = maybeReset(await readState());
-
   if (body.increment) {
-    s.uploads_today += 1;
-  } else {
-    if (typeof body.uploads_today === "number") s.uploads_today = body.uploads_today;
-    if (body.last_reset_date) s.last_reset_date = body.last_reset_date;
+    return NextResponse.json({
+      error: "increment is no longer accepted — /api/youtube/upload counts every upload itself. "
+           + "Set uploads_today explicitly if you need to correct the counter.",
+    }, { status: 400 });
   }
-
-  await writeState(s);
-  return NextResponse.json(s);
+  return NextResponse.json(await setQuota(body));
 }
 
 export const GET = withRequestLogging("api:backfill/state", getHandler);

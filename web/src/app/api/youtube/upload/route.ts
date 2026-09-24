@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
 import { downloadFromSource } from "../../../../lib/sourceDownload";
+import { recordUpload } from "../../../../lib/uploadQuota";
 
 /** Smallest plausible recording. A Drive viewer page is ~80 KB; the two
  *  videos killed on 2026-09-23 were 80085 and 80155 bytes. */
@@ -233,7 +234,22 @@ async function handler(req: NextRequest) {
         const videoId = result.id as string;
         const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
         serverLog("info", "ext:youtube-upload", "published", { title, videoId, videoUrl });
-        send("complete", { videoId, videoUrl });
+
+        // Count the 1,600 units here — the one place every publish path
+        // reaches. Until 2026-09-24 only BackfillPanel's orchestrator
+        // incremented, so card publishes, side-publishes and retries
+        // spent quota invisibly. Non-fatal: the upload succeeded, and
+        // failing the response over bookkeeping would be worse than a
+        // miscount.
+        try {
+          const q = await recordUpload();
+          send("complete", { videoId, videoUrl, uploadsToday: q.uploads_today, uploadsRemaining: q.remaining });
+        } catch (qerr) {
+          serverLog("warn", "ext:youtube-upload", "quota-count-failed", {
+            videoId, error: qerr instanceof Error ? qerr.message : String(qerr),
+          });
+          send("complete", { videoId, videoUrl });
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         serverLog("error", "ext:youtube-upload", "failed", { title, error: message });

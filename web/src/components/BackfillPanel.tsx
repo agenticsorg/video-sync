@@ -284,14 +284,16 @@ export default function BackfillPanel({ videos, onEvent, onMutated, onNavigateTo
       removeFromQueue(videoId);
       setQueueState(loadQueue());
 
-      // Increment server quota counter
-      await fetch("/api/backfill/state", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ increment: true }),
-      }).then(r => r.ok ? r.json() : null).then(d => { if (d) setServerState(d); }).catch(() => {});
+      // The upload route counts the quota now (lib/uploadQuota), so this
+      // no longer increments — doing both would double-count backfill
+      // uploads, which were the only ones ever counted before. Re-read
+      // the authoritative snapshot instead.
+      await fetch("/api/backfill/state")
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d) setServerState(d); })
+        .catch(() => {});
 
-      // Update client state
+      // Mirror it into the local cache the header falls back to.
       const cs = loadClientState();
       const today = new Date().toISOString().slice(0, 10);
       const newUploadsToday = cs.last_reset_date === today ? cs.uploads_today + 1 : 1;

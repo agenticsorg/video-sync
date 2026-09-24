@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { VideoRecordJSON } from "../lib/wasm";
 import {
@@ -16,6 +16,7 @@ import { getDisplayTitle } from "../lib/processingRules";
 import { getPrivacy, setPrivacy, normalisePrivacy, type PrivacyStatus } from "../lib/youtubePrivacyCache";
 import { getPresence, setPresenceBulk, type KalturaPresence, type KalturaState } from "../lib/kalturaPresenceCache";
 import { SummaryLozenge } from "./SummaryLozenge";
+import { getUploadQuota, getUploadQuotaCached, type QuotaSnapshot } from "../lib/uploadQuotaClient";
 
 /** Extract YouTube video ID from a watch URL or short URL. */
 function extractYouTubeId(url: string | null | undefined): string | null {
@@ -300,6 +301,17 @@ export default function BackfillOverview({ videos, profile, onNavigateToVideo }:
     { target: 0, published: 0, approved: 0, backlog: 0, failed: 0, gaps: 0 },
   );
 
+  // Quota sits beside the completion estimate because the estimate is
+  // only true if today's uploads are actually available. "~27 days at
+  // 5/day" assumes five happen; six is the hard API ceiling and it is
+  // shared with every other publish path.
+  const [quota, setQuota] = useState<QuotaSnapshot | null>(() => getUploadQuotaCached());
+  useEffect(() => {
+    let cancelled = false;
+    void getUploadQuota().then(q => { if (!cancelled && q) setQuota(q); });
+    return () => { cancelled = true; };
+  }, []);
+
   const pct = totals.target > 0 ? Math.round((totals.published / totals.target) * 100) : 0;
   const daysRemaining = totals.target - totals.published;
   const estDays = profile.max_uploads_per_day > 0
@@ -319,6 +331,26 @@ export default function BackfillOverview({ videos, profile, onNavigateToVideo }:
         {estDays != null && (
           <span style={{ color: "var(--text-muted)", fontStyle: "italic" }}>
             ~{estDays} days to clear at {profile.max_uploads_per_day}/day
+          </span>
+        )}
+        {quota && (
+          <span
+            title={
+              `YouTube allows ${quota.limit} uploads a day (10,000 quota units at 1,600 each). `
+              + `${quota.units_used.toLocaleString()} units used so far. Counts EVERY publish — backfill, `
+              + `card publish, side-publish and retry — not just backfill runs. Resets midnight Pacific.`
+              + (profile.max_uploads_per_day > quota.limit
+                  ? ` This profile paces ${profile.max_uploads_per_day}/day, above the API ceiling.`
+                  : "")
+            }
+            style={{
+              color: quota.remaining === 0 ? "var(--red)" : quota.remaining <= 2 ? "#fbbf24" : "var(--text-muted)",
+              fontWeight: quota.remaining <= 2 ? 600 : 400,
+            }}
+          >
+            {quota.remaining === 0
+              ? `quota spent (${quota.uploads_today}/${quota.limit} today)`
+              : `${quota.uploads_today}/${quota.limit} uploads used today`}
           </span>
         )}
       </div>
