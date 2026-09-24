@@ -10,7 +10,7 @@ import { createWriteStream, promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { pipeline } from "stream/promises";
-import { Readable } from "stream";
+import { Readable, Transform } from "stream";
 
 const BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -24,12 +24,71 @@ export interface SourceCreds {
   kalturaAdminSecret?: string;
 }
 
+/** Bytes transferred so far, and the total when the server declared one. */
+export interface TransferProgress {
+  bytes: number;
+  total: number | null;
+}
+
+export type ProgressFn = (p: TransferProgress) => void;
+
+/** How often to report. A 4.86 GB download takes minutes; without
+ *  something every couple of seconds the UI is indistinguishable from a
+ *  hang, which is exactly how 2026-09-24's OOM looked to the operator. */
+const PROGRESS_INTERVAL_MS = 2000;
+
+/** Human bytes. 5217991781 reads as "4.86 GB". */
+export function formatBytes(n: number): string {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
+  if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
+
+/** "1.20 GB / 4.86 GB (24%)", or just the running total when the size
+ *  is unknown — a progress bar that invents a denominator is worse than
+ *  one that admits it doesn't have it. */
+export function formatProgress(p: TransferProgress): string {
+  if (p.total && p.total > 0) {
+    const pct = Math.min(100, Math.round((p.bytes / p.total) * 100));
+    return `${formatBytes(p.bytes)} / ${formatBytes(p.total)} (${pct}%)`;
+  }
+  return formatBytes(p.bytes);
+}
+
+/** A pass-through that counts bytes and reports on a timer. */
+function progressCounter(total: number | null, onProgress?: ProgressFn): Transform {
+  let seen = 0;
+  let lastReport = 0;
+  return new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      seen += chunk.length;
+      const now = Date.now();
+      if (onProgress && now - lastReport >= PROGRESS_INTERVAL_MS) {
+        lastReport = now;
+        onProgress({ bytes: seen, total });
+      }
+      cb(null, chunk);
+    },
+    flush(cb) {
+      onProgress?.({ bytes: seen, total });
+      cb();
+    },
+  });
+}
+
 /** Stream a fetch response body to a file on disk. */
-async function streamToFile(response: Response, filePath: string): Promise<void> {
+async function streamToFile(
+  response: Response,
+  filePath: string,
+  onProgress?: ProgressFn,
+): Promise<void> {
   if (!response.body) throw new Error("Response has no body");
   const webStream = response.body as ReadableStream<Uint8Array>;
   const nodeStream = Readable.fromWeb(webStream as Parameters<typeof Readable.fromWeb>[0]);
-  await pipeline(nodeStream, createWriteStream(filePath));
+  const declared = Number(response.headers.get("content-length") ?? "");
+  const total = Number.isFinite(declared) && declared > 0 ? declared : null;
+  await pipeline(nodeStream, progressCounter(total, onProgress), createWriteStream(filePath));
 }
 
 /**
@@ -80,7 +139,7 @@ export function extractDriveFileId(downloadUrl: string): string | null {
  * `drive.readonly`, the same identity ADR-071's ingest uses, so
  * anything the app could import it can also publish.
  */
-async function downloadDriveToFile(fileId: string, outPath: string): Promise<void> {
+async function downloadDriveToFile(fileId: string, outPath: string, onProgress?: ProgressFn): Promise<void> {
   const { GoogleAuth } = await import("google-auth-library");
   const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
   const client = await auth.getClient();
@@ -101,7 +160,7 @@ async function downloadDriveToFile(fileId: string, outPath: string): Promise<voi
   }
   // Belt and braces: an auth redirect or interstitial would be HTML.
   rejectNonMediaBody(res, `drive://${fileId}`);
-  await streamToFile(res, outPath);
+  await streamToFile(res, outPath, onProgress);
 }
 
 /**
@@ -244,7 +303,12 @@ async function downloadYouTubeToFile(videoId: string, outPath: string, cookies?:
  * Dispatch by URL scheme. Writes the source media to outPath. Throws with a
  * useful message if creds or scheme don't match.
  */
-export async function downloadFromSource(downloadUrl: string, creds: SourceCreds, outPath: string): Promise<void> {
+export async function downloadFromSource(
+  downloadUrl: string,
+  creds: SourceCreds,
+  outPath: string,
+  onProgress?: ProgressFn,
+): Promise<void> {
   if (downloadUrl.startsWith("zoom://recording/")) {
     return downloadZoomToFile(downloadUrl.slice("zoom://recording/".length), creds, outPath);
   }
@@ -269,13 +333,13 @@ export async function downloadFromSource(downloadUrl: string, creds: SourceCreds
   // mismatch went unnoticed because Drive answers the viewer URL 200.
   const driveId = extractDriveFileId(downloadUrl);
   if (driveId) {
-    return downloadDriveToFile(driveId, outPath);
+    return downloadDriveToFile(driveId, outPath, onProgress);
   }
   if (downloadUrl.startsWith("http://") || downloadUrl.startsWith("https://")) {
     const dlRes = await fetch(downloadUrl);
     if (!dlRes.ok) throw new Error(`Source download failed (${dlRes.status})`);
     rejectNonMediaBody(dlRes, downloadUrl);
-    return streamToFile(dlRes, outPath);
+    return streamToFile(dlRes, outPath, onProgress);
   }
   throw new Error(`Unsupported source URL scheme: ${downloadUrl.slice(0, 40)}`);
 }

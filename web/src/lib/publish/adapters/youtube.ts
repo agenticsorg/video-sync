@@ -49,9 +49,15 @@ export function parseSseChunk(
  *  phase says we were mid-trim. Exported so the wording is testable. */
 export function streamEndedMessage(lastPhase: string): string {
   const trimmed = /^Trimming /i.test(lastPhase);
+  // Both hints were stale after 2026-09-24. The trim one cited a 4 GiB
+  // tmpfs when the container has 8 GiB, and both pointed the operator
+  // at Cloud Run logs they have no way to read. Media now stages on the
+  // FUSE bucket rather than tmpfs, so an OOM here means ffmpeg's own
+  // working set, not the file sitting in RAM — and the event log opens
+  // on the failure automatically now, so there is somewhere to look.
   const hint = trimmed
-    ? " Likely Cloud Run OOM during ffmpeg trim — the recording is too large for the 4 GiB tmpfs + working set. Try publishing with trim=0 (no trim) or ask Ops to bump Cloud Run memory."
-    : " Server-side process exited before completing — check Cloud Run logs (filter component=\"ext:youtube-upload\") around this time.";
+    ? " The trim step ran out of memory. Media stages on the bucket rather than in RAM, so this is ffmpeg's working set on a very large file — publishing without a trim avoids it."
+    : " The server process exited mid-publish. The event log below has the phase it reached; a stall during download or upload on a multi-gigabyte recording usually means the instance was recycled.";
   return `Upload stream ended without a result. Last phase: "${lastPhase}".${hint}`;
 }
 

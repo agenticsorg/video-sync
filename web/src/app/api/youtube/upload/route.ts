@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
-import { downloadFromSource } from "../../../../lib/sourceDownload";
+import { downloadFromSource, formatProgress, formatBytes } from "../../../../lib/sourceDownload";
 import { recordUpload } from "../../../../lib/uploadQuota";
 import { stagedPath, discardStaged } from "../../../../lib/mediaStaging";
 
@@ -153,7 +153,13 @@ async function handler(req: NextRequest) {
           firefliesApiKey,
           ytCookies: body.ytCookies,
           kalturaPartnerId, kalturaAdminSecret,
-        }, tmpPath);
+        }, tmpPath, (p) => {
+          // A 4.86 GB pull sits on one phase string for nearly three
+          // minutes. Without bytes moving on screen it is
+          // indistinguishable from a hang — which is precisely how the
+          // 2026-09-24 OOM looked to the operator before it died.
+          send("progress", { phase: `Downloading source video… ${formatProgress(p)}` });
+        });
 
         // Size is the cheapest possible sanity check, and the one that
         // would have caught the HTML uploads immediately: 80 KB is not a
@@ -161,6 +167,7 @@ async function handler(req: NextRequest) {
         // in Cloud Logging without reconstructing it from the catalog.
         const downloadedBytes = (await fs.stat(tmpPath)).size;
         serverLog("info", "ext:youtube-upload", "download-bytes", { title, downloadedBytes, downloadUrl });
+        send("progress", { phase: `Downloaded ${formatBytes(downloadedBytes)} — preparing upload…` });
         if (downloadedBytes < MIN_PLAUSIBLE_MEDIA_BYTES) {
           throw new Error(
             `Source download produced only ${downloadedBytes} bytes — too small to be a recording. ` +
@@ -227,7 +234,21 @@ async function handler(req: NextRequest) {
         // Step 4: Stream video to YouTube
         send("progress", { phase: "Uploading to YouTube…" });
         serverLog("info", "ext:youtube-upload", "upload-stream-start", { title, videoSize });
+        // Same again for the push. The upload half is the slower of the
+        // two for a large file and was equally silent.
+        let sentBytes = 0;
+        let lastUploadReport = 0;
         const fileStream = createReadStream(tmpPath);
+        fileStream.on("data", (chunk) => {
+          sentBytes += chunk.length;
+          const now = Date.now();
+          if (now - lastUploadReport >= 2000) {
+            lastUploadReport = now;
+            send("progress", {
+              phase: `Uploading to YouTube… ${formatProgress({ bytes: sentBytes, total: videoSize })}`,
+            });
+          }
+        });
         const nodeReadable = Readable.toWeb(fileStream) as ReadableStream;
         const uploadRes = await fetch(uploadUrl, {
           method: "PUT",

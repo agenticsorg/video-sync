@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { extractDriveFileId } from "../src/lib/sourceDownload";
+import { extractDriveFileId, formatBytes, formatProgress } from "../src/lib/sourceDownload";
 
 const FILE_ID = "1FezgVolv-zD5Fmx4BIse5GJcQuRN4IMB";
 
@@ -109,5 +109,52 @@ describe("the size floor that would have caught the HTML uploads", () => {
     expect(80155).toBeLessThan(FLOOR);
     // A short phone clip is already ~100x the floor.
     expect(119886171).toBeGreaterThan(FLOOR);
+  });
+});
+
+/**
+ * Transfer progress.
+ *
+ * A 4.86 GB download sits on one phase string for nearly three minutes.
+ * On 2026-09-24 that was indistinguishable from a hang: the operator
+ * reported "it seemed to just stall", and it had in fact been OOM-killed
+ * eight minutes earlier. Bytes moving on screen is the difference
+ * between a slow operation and a dead one.
+ */
+describe("formatBytes", () => {
+  it("renders the real file sizes in play", () => {
+    expect(formatBytes(5217991781)).toBe("4.86 GB");   // the retreat recording
+    expect(formatBytes(119886171)).toBe("114 MB");
+    expect(formatBytes(80085)).toBe("78 KB");          // the Drive viewer page
+    expect(formatBytes(512)).toBe("512 B");
+  });
+
+  it("switches units at the boundaries", () => {
+    expect(formatBytes(1024)).toBe("1 KB");
+    expect(formatBytes(1024 ** 2)).toBe("1 MB");
+    expect(formatBytes(1024 ** 3)).toBe("1.00 GB");
+  });
+});
+
+describe("formatProgress", () => {
+  it("gives a fraction and a percentage when the size is known", () => {
+    expect(formatProgress({ bytes: 1288490188, total: 5217991781 }))
+      .toBe("1.20 GB / 4.86 GB (25%)");
+  });
+
+  it("reports the running total alone when the size is not declared", () => {
+    // A progress bar that invents a denominator is worse than one that
+    // admits it hasn't got it.
+    expect(formatProgress({ bytes: 1288490188, total: null })).toBe("1.20 GB");
+    expect(formatProgress({ bytes: 1288490188, total: 0 })).toBe("1.20 GB");
+  });
+
+  it("clamps at 100% rather than reporting 103%", () => {
+    // Content-Length and the delivered body can disagree.
+    expect(formatProgress({ bytes: 110, total: 100 })).toContain("(100%)");
+  });
+
+  it("starts at 0% rather than NaN", () => {
+    expect(formatProgress({ bytes: 0, total: 5217991781 })).toBe("0 B / 4.86 GB (0%)");
   });
 });

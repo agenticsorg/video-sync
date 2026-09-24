@@ -209,19 +209,37 @@ describe("youtube adapter — SSE handling", () => {
     })).rejects.toThrow("quota exceeded");
   });
 
-  it("names the OOM case when the stream dies mid-trim", async () => {
+  it("names the trim case when the stream dies mid-trim", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse([
       'event: progress\ndata: {"phase":"Trimming 42s from start"}\n\n',
     ])));
     await expect(youtubeAdapter.push({
       record, spec: YT, attrs: { title: "T", description: "D", tags: [] },
       sourceUrl: "zoom://1", creds,
-    })).rejects.toThrow(/Cloud Run OOM during ffmpeg trim/);
+    })).rejects.toThrow(/trim step ran out of memory/);
   });
 
-  it("points at the logs when the stream dies outside a trim", () => {
-    expect(streamEndedMessage("Uploading to YouTube")).toMatch(/check Cloud Run logs/);
-    expect(streamEndedMessage("Uploading to YouTube")).not.toMatch(/OOM/);
+  it("no longer blames tmpfs for a trim OOM", () => {
+    // Media stages on the FUSE bucket since 2026-09-24, so the old
+    // "too large for the 4 GiB tmpfs" hint was doubly wrong: the
+    // container has 8 GiB and the file is not in RAM at all.
+    const msg = streamEndedMessage("Trimming 42s from start");
+    expect(msg).not.toMatch(/tmpfs|4 GiB/);
+    expect(msg).toMatch(/ffmpeg's working set/);
+  });
+
+  it("points at the in-app log, not Cloud Run, when the stream dies outside a trim", () => {
+    // The operator reading this has a card, not gcloud. The event log
+    // now opens on the failure automatically.
+    const msg = streamEndedMessage("Uploading to YouTube");
+    expect(msg).not.toMatch(/Cloud Run logs|component=/);
+    expect(msg).toMatch(/event log below/);
+    expect(msg).not.toMatch(/OOM/);
+  });
+
+  it("still reports the phase it reached, whichever hint applies", () => {
+    expect(streamEndedMessage("Downloading source video… 1.20 GB / 4.86 GB (24%)"))
+      .toContain('Last phase: "Downloading source video… 1.20 GB / 4.86 GB (24%)"');
   });
 
   it("refuses to push without YouTube credentials", async () => {

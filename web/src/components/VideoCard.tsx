@@ -282,6 +282,20 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
   const [summarising, setSummarising] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
+
+  /**
+   * Report a publish failure: banner AND the event log, opened.
+   *
+   * The failure message used to end with "check Cloud Run logs (filter
+   * component=…)" — a reasonable instruction for an engineer with gcloud
+   * and an unreasonable one for an operator looking at a card. The log
+   * is right here, newest entry first, so the relevant line is at the
+   * top the moment the panel opens.
+   */
+  function failPublish(message: string) {
+    setPublishError(classifyPublishError(message));
+    setShowLog(true);
+  }
   const [logTick, setLogTick] = useState(0);
   const [showParticipants, setShowParticipants] = useState(false);
   const [rejectionTick, setRejectionTick] = useState(0);
@@ -966,7 +980,7 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
       });
 
       onMutated();
-      if (result.message) setPublishError(classifyPublishError(result.message));
+      if (result.message) failPublish(result.message);
       if (result.status === "failed" || result.status === "error") onMutated();
     } finally {
       setUploading(false);
@@ -1131,7 +1145,7 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
         );
       }
       onEvent(`VideoPublishFailed: "${video.title}"${dateTag(video.recorded_at)} — YouTube: ${msg}`, { video_id: video.id });
-      setPublishError(classifyPublishError(msg));
+      failPublish(msg);
       onMutated();
       firePostProcessingRules(loadPostProcessingRules(), false, video, undefined, msg);
     } finally {
@@ -1225,7 +1239,7 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
         );
       }
       onEvent(`VideoPublishFailed: "${video.title}"${dateTag(video.recorded_at)} — Kaltura: ${msg}`, { video_id: video.id });
-      setPublishError(classifyPublishError(msg));
+      failPublish(msg);
       onMutated();
       firePostProcessingRules(loadPostProcessingRules(), false, video, undefined, msg);
     } finally {
@@ -1402,7 +1416,7 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       onEvent(`DrivePublishFailed: "${video.title}"${dateTag(video.recorded_at)} — ${msg}`, { video_id: video.id });
-      setPublishError(classifyPublishError(msg));
+      failPublish(msg);
       setUploadPhase("");
     } finally {
       setUploading(false);
