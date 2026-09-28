@@ -43,6 +43,13 @@ import { withProvenanceFooter, recordProvenanceParts } from "../lib/publish/prov
 import { executePublish } from "../lib/publish/execute";
 import { advanceToPublished, recordPushed, recordFailed } from "../lib/publish/advance";
 import { extractDriveFolderId } from "../lib/publish/driveFolderId";
+import {
+  declaredKalturaCategories,
+  kalturaEntryId,
+  reconcileKalturaCategories,
+  summarizeReconcile,
+  isCompliant,
+} from "../lib/kalturaCategories";
 import type { PublishCredentials } from "../lib/publish/types";
 import type { DestinationSpec } from "../lib/youtubeTitleAlign";
 
@@ -166,6 +173,11 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
   const [publishError, setPublishError] = useState<{ message: string; hint?: string; hintHref?: string } | null>(null);
   const [publishAttrs, setPublishAttrs] = useState<PublishAttributes | null>(null);
   const [showPreview, setShowPreview] = useState(false);
+  /** Kaltura category reconcile — in-flight flag and the last result
+   *  line, shown next to the button so the outcome doesn't require a
+   *  trip to the event log. */
+  const [fixingCategories, setFixingCategories] = useState(false);
+  const [categoryFixResult, setCategoryFixResult] = useState<{ ok: boolean; text: string } | null>(null);
   /** YouTube grant state, so an expired authorisation is visible in the
    *  publish preview rather than discovered mid-upload. Seeded from the
    *  shared cache so a second card costs no request. */
@@ -1245,6 +1257,45 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
     } finally {
       setUploading(false);
       setUploadPhase("");
+    }
+  }
+
+  /**
+   * Apply the series' declared Kaltura categories to the entry this
+   * record was published to.
+   *
+   * Needed because they have never been applied: the registry holds
+   * category NAMES, the adapter coerced each with `Number()` and
+   * dropped the NaNs, and the upload route then skipped the field
+   * because the resulting array was empty. See lib/kalturaCategories.ts.
+   *
+   * Re-runnable and additive — Kaltura memberships the entry already
+   * has are reported, not re-added, and nothing is removed.
+   */
+  async function fixKalturaCategories() {
+    const entryId = kalturaEntryId(video.locations);
+    const declared = declaredKalturaCategories(resolvedDests.destinations);
+    if (!entryId || declared.length === 0) return;
+
+    setFixingCategories(true);
+    setCategoryFixResult(null);
+    try {
+      const res = await reconcileKalturaCategories({ entryId, declared });
+      const summary = summarizeReconcile(res);
+      setCategoryFixResult({ ok: isCompliant(res), text: summary });
+      onEvent(
+        `KalturaCategoriesReconciled: "${video.title}"${dateTag(video.recorded_at)} — ${entryId}: ${summary}`,
+        { video_id: video.id },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCategoryFixResult({ ok: false, text: msg });
+      onEvent(
+        `KalturaCategoriesFailed: "${video.title}"${dateTag(video.recorded_at)} — ${entryId}: ${msg}`,
+        { video_id: video.id },
+      );
+    } finally {
+      setFixingCategories(false);
     }
   }
 
@@ -2466,6 +2517,12 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
    *  Excludes `Other`, which stays a manual checklist item. */
   const automatedDests = resolvedDests.destinations.filter(isAutomatedDestination);
   const wantsKaltura = resolvedDests.destinations.some(d => d.platform === "Kaltura");
+  /** The series declares Kaltura categories and this record is on
+   *  Kaltura, so there is an entry to reconcile them against. Offered
+   *  regardless of status: the 19 Kaltura entries in the catalog all
+   *  predate any working category application, and most sit Published. */
+  const declaredKalturaCats = declaredKalturaCategories(resolvedDests.destinations);
+  const canFixKalturaCategories = alreadyOnKaltura && declaredKalturaCats.length > 0;
   const driveDests   = resolvedDests.destinations.filter((d): d is Extract<import("../lib/youtubeTitleAlign").DestinationSpec, { platform: "GoogleDrive" }> => d.platform === "GoogleDrive");
   const otherDests   = resolvedDests.destinations.filter((d): d is Extract<import("../lib/youtubeTitleAlign").DestinationSpec, { platform: "Other" }> => d.platform === "Other");
   // A destination is "in-scope for the card's action row" when the
@@ -4330,6 +4387,27 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
           >
             {uploading ? "Uploading…" : "Publish to Kaltura"}
           </button>
+        )}
+        {canFixKalturaCategories && showKalturaBtn && (
+          <button
+            className="btn btn-sm"
+            onClick={fixKalturaCategories}
+            disabled={fixingCategories}
+            title={`Add this Kaltura entry to the categories the series declares (${declaredKalturaCats.join(", ")}). Additive — existing categories are kept.`}
+          >
+            {fixingCategories ? "Syncing categories…" : "Fix Kaltura categories"}
+          </button>
+        )}
+        {categoryFixResult && (
+          <span
+            style={{
+              fontSize: "0.72rem",
+              color: categoryFixResult.ok ? "var(--text-muted)" : "var(--danger, #c33)",
+              alignSelf: "center",
+            }}
+          >
+            {categoryFixResult.text}
+          </span>
         )}
         {/* ADR-075 Phase 2 — Drive folder destination(s) from the series.
              §Follow-up #4 shipped: this uploads the media server-side via
