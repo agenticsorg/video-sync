@@ -60,7 +60,18 @@ export interface KalturaCategory {
   fullName: string;
 }
 
-export type ResolutionReason = "template" | "not_found" | "ambiguous";
+/**
+ * `listing_empty` is deliberately distinct from `not_found`.
+ *
+ * The first run against a live entry reported four different names as
+ * `not_found` — an implausible coincidence, and the reason was
+ * unfalsifiable from the output alone: a name missing from a listing of
+ * 200 categories and a name missing from a listing of ZERO categories
+ * are entirely different faults (fix the registry vs. fix the session's
+ * permissions), and the original code called both `not_found`. A
+ * diagnosis the reader cannot check is worse than no diagnosis.
+ */
+export type ResolutionReason = "template" | "not_found" | "ambiguous" | "listing_empty";
 
 export interface CategoryResolution {
   /** Exactly what the series registry declared. */
@@ -71,6 +82,41 @@ export interface CategoryResolution {
   fullName: string | null;
   /** Why `id` is null. Absent on a successful resolution. */
   reason?: ResolutionReason;
+  /** Close names from the listing, when `reason` is `not_found`. The
+   *  answer to "then what IS it called?" without a second round trip. */
+  suggestions?: string[];
+}
+
+/** Words, lowercased, punctuation dropped. "Agentics.org Video Portal"
+ *  → ["agentics","org","video","portal"]. */
+function tokenize(s: string): string[] {
+  return s.toLowerCase().split(/[^a-z0-9]+/i).filter(Boolean);
+}
+
+/**
+ * Categories whose names are close to what was declared.
+ *
+ * Scored on token overlap rather than edit distance: the realistic
+ * failure is a renamed or re-nested category ("Weekly Recordings" now
+ * living under a parent, "vod_sources" now "VOD Sources"), not a
+ * typo. Token overlap catches those; Levenshtein would not.
+ */
+export function suggestFullNames(raw: string, catalog: KalturaCategory[], limit = 3): string[] {
+  const want = new Set(tokenize(raw));
+  if (want.size === 0) return [];
+  return catalog
+    .map(c => {
+      const have = new Set(tokenize(c.fullName));
+      let shared = 0;
+      for (const t of want) if (have.has(t)) shared++;
+      // Normalise by the declared name's length so a sprawling
+      // category path doesn't outrank a tight match.
+      return { fullName: c.fullName, score: shared / want.size };
+    })
+    .filter(s => s.score > 0)
+    .sort((a, b) => b.score - a.score || a.fullName.localeCompare(b.fullName))
+    .slice(0, limit)
+    .map(s => s.fullName);
 }
 
 export interface ReconcilePlan {
@@ -125,7 +171,19 @@ export function resolveDeclaredCategory(
   if (byName.length > 1) {
     return { raw, id: null, fullName: null, reason: "ambiguous" };
   }
-  return { raw, id: null, fullName: null, reason: "not_found" };
+  // Nothing to have matched against. Reporting "not_found" here would
+  // point the reader at the registry when the fault is the session.
+  if (catalog.length === 0) {
+    return { raw, id: null, fullName: null, reason: "listing_empty" };
+  }
+  const suggestions = suggestFullNames(raw, catalog);
+  return {
+    raw,
+    id: null,
+    fullName: null,
+    reason: "not_found",
+    ...(suggestions.length ? { suggestions } : {}),
+  };
 }
 
 /**
@@ -196,6 +254,16 @@ export interface ReconcileResponse {
   alreadyPresent: CategoryResolution[];
   unresolved: CategoryResolution[];
   failed: ReconcileOutcome[];
+  /** How many categories `category.list` returned. Zero is the whole
+   *  diagnosis; any other number makes an unresolved name a real
+   *  registry problem rather than a permissions one. */
+  categoriesListed?: number;
+  /** A sample of what the partner actually has, sent only when
+   *  something failed to resolve. Turns "then what is it called?" into
+   *  a question the operator can answer from the same screen. */
+  availableSample?: string[];
+  /** Categories the entry already belonged to before this ran. */
+  currentCategoryIds?: number[];
 }
 
 /**
@@ -214,10 +282,30 @@ export function summarizeReconcile(res: ReconcileResponse): string {
   if (res.failed.length) {
     parts.push(`${res.failed.length} failed (${res.failed.map(f => f.error ?? "?").join("; ")})`);
   }
+
   const templates = res.unresolved.filter(u => u.reason === "template");
-  const missing = res.unresolved.filter(u => u.reason !== "template");
+  const listingEmpty = res.unresolved.filter(u => u.reason === "listing_empty");
+  const missing = res.unresolved.filter(u => u.reason === "not_found" || u.reason === "ambiguous");
+
+  // The empty listing subsumes everything else: if no categories came
+  // back, naming the individual values is noise around one fact.
+  if (listingEmpty.length) {
+    parts.push(
+      `Kaltura returned no categories for this partner, so none of ${listingEmpty.length} declared name(s) could be resolved — the admin session likely cannot list categories`,
+    );
+  }
   if (missing.length) {
-    parts.push(`${missing.length} unresolved: ${missing.map(m => `${m.raw} (${m.reason})`).join(", ")}`);
+    parts.push(
+      `${missing.length} unresolved: ${missing
+        .map(m => {
+          const hint = m.suggestions?.length ? ` — did you mean ${m.suggestions.join(" / ")}?` : "";
+          return `${m.raw} (${m.reason})${hint}`;
+        })
+        .join(", ")}`,
+    );
+    if (typeof res.categoriesListed === "number") {
+      parts.push(`checked against ${res.categoriesListed} categories on the partner`);
+    }
   }
   if (templates.length) {
     parts.push(`${templates.map(t => t.raw).join(", ")} is an integration placeholder — not applicable`);
@@ -225,7 +313,12 @@ export function summarizeReconcile(res: ReconcileResponse): string {
   return parts.length ? parts.join("; ") : "nothing to do";
 }
 
-/** True when the reconcile left the entry in the declared state. */
+/**
+ * True when the reconcile left the entry in the declared state.
+ *
+ * A template token is the only unresolved reason that still counts as
+ * compliant — it is not applicable rather than not applied.
+ */
 export function isCompliant(res: ReconcileResponse): boolean {
   return res.failed.length === 0 && res.unresolved.every(u => u.reason === "template");
 }
@@ -247,5 +340,8 @@ export async function reconcileKalturaCategories(
     alreadyPresent: data.alreadyPresent ?? [],
     unresolved: data.unresolved ?? [],
     failed: data.failed ?? [],
+    categoriesListed: data.categoriesListed,
+    availableSample: data.availableSample,
+    currentCategoryIds: data.currentCategoryIds,
   };
 }

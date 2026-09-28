@@ -36,6 +36,10 @@ const CATEGORY_PAGE_SIZE = 500;
  *  targeted lookup, not a full listing; the response says so rather
  *  than silently resolving against a truncated catalog. */
 const MAX_CATEGORY_PAGES = 8;
+/** How many existing category names to echo back when a declared name
+ *  fails to resolve. Enough to recognise the naming scheme, few enough
+ *  to read in a result line. */
+const SAMPLE_SIZE = 25;
 
 /**
  * Every category on the partner account.
@@ -50,6 +54,12 @@ async function listAllCategories(ks: string): Promise<{ categories: KalturaCateg
   for (let page = 1; page <= MAX_CATEGORY_PAGES; page++) {
     const res = await kalturaCall("category", "list", {
       ks,
+      // An explicit filter objectType, matching every other Kaltura
+      // call in this repo (media.list passes KalturaMediaEntryFilter).
+      // The first version omitted the filter entirely and the listing
+      // came back with nothing to match against; Kaltura is not
+      // consistent about defaulting it.
+      filter: { objectType: "KalturaCategoryFilter" },
       pager: { pageSize: CATEGORY_PAGE_SIZE, pageIndex: page, objectType: "KalturaFilterPager" },
     });
     const objects = unwrapObjects<{ id?: number | string; name?: string; fullName?: string }>(res);
@@ -149,12 +159,20 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       }
     }
 
+    // Only sent when something failed to resolve. On a clean run it is
+    // noise; on a failure it is the answer to "then what IS it called?"
+    const anythingUnresolved = plan.unresolved.some(u => u.reason !== "template");
     const response: ReconcileResponse = {
       entryId,
       added,
       alreadyPresent: plan.alreadyPresent,
       unresolved: plan.unresolved,
       failed,
+      categoriesListed: categories.length,
+      currentCategoryIds: currentIds,
+      ...(anythingUnresolved
+        ? { availableSample: categories.slice(0, SAMPLE_SIZE).map(c => c.fullName) }
+        : {}),
     };
     serverLog("info", "ext:kaltura-categories", "done", {
       rid,
@@ -163,6 +181,13 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       alreadyPresent: plan.alreadyPresent.length,
       unresolved: plan.unresolved.map(u => `${u.raw}:${u.reason}`),
       failed: failed.length,
+      // The three numbers that make an unresolved name diagnosable:
+      // an empty listing is a permissions fault, a populated one is a
+      // registry fault, and the membership says whether categories are
+      // reaching this entry by some other route (the Zoom connector).
+      categoriesListed: categories.length,
+      currentCategoryIds: currentIds,
+      sample: categories.slice(0, SAMPLE_SIZE).map(c => c.fullName),
     });
     return NextResponse.json(response);
   } catch (err) {

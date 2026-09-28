@@ -22,6 +22,7 @@ import {
   kalturaEntryId,
   summarizeReconcile,
   isCompliant,
+  suggestFullNames,
   TEMPLATE_TOKEN_RE,
   type KalturaCategory,
   type ReconcileResponse,
@@ -107,6 +108,63 @@ describe("resolveDeclaredCategory", () => {
       id: null,
       reason: "not_found",
     });
+  });
+
+  it("distinguishes an empty listing from a name that is genuinely absent", () => {
+    // The live first run reported four unrelated names as not_found,
+    // which was unfalsifiable: a name missing from 200 categories and a
+    // name missing from ZERO categories are different faults (registry
+    // vs. session permissions) and both read as not_found.
+    expect(resolveDeclaredCategory("vod_sources", []).reason).toBe("listing_empty");
+    expect(resolveDeclaredCategory("vod_sources", CATALOG).id).toBe(103);
+  });
+
+  it("still accepts a numeric id when the listing is empty", () => {
+    // An id needs no listing to be usable, so an unreadable category
+    // list must not block the one case that does not depend on it.
+    expect(resolveDeclaredCategory("103", [])).toMatchObject({ id: 103 });
+  });
+
+  it("suggests the likely intended category when a name misses", () => {
+    const renamed: KalturaCategory[] = [
+      { id: 7, name: "VOD Sources", fullName: "Agentics>VOD Sources" },
+      { id: 8, name: "Unrelated", fullName: "Unrelated" },
+    ];
+    const r = resolveDeclaredCategory("vod_sources", renamed);
+    expect(r.reason).toBe("not_found");
+    expect(r.suggestions).toContain("Agentics>VOD Sources");
+  });
+});
+
+describe("suggestFullNames", () => {
+  it("finds a category that has been re-nested under a parent", () => {
+    // The realistic failure is a moved or reworded category, not a
+    // typo — which is why this scores token overlap, not edit distance.
+    const moved: KalturaCategory[] = [
+      { id: 1, name: "Weekly Recordings", fullName: "Agentics.org Video Portal>Weekly Recordings" },
+      { id: 2, name: "Daily Standups", fullName: "Daily Standups" },
+    ];
+    expect(suggestFullNames("Weekly Recordings", moved)[0])
+      .toBe("Agentics.org Video Portal>Weekly Recordings");
+  });
+
+  it("ranks a tighter match above a sprawling path that merely contains the words", () => {
+    const cats: KalturaCategory[] = [
+      { id: 1, name: "Portal", fullName: "Agentics.org Video Portal" },
+      { id: 2, name: "Misc", fullName: "Archive>Old>Stuff" },
+    ];
+    expect(suggestFullNames("Agentics.org Video Portal", cats)[0]).toBe("Agentics.org Video Portal");
+  });
+
+  it("offers nothing rather than noise when nothing is close", () => {
+    expect(suggestFullNames("Completely Unrelated", [
+      { id: 1, name: "vod_sources", fullName: "vod_sources" },
+    ])).toEqual([]);
+  });
+
+  it("returns nothing for an empty catalog or an empty needle", () => {
+    expect(suggestFullNames("anything", [])).toEqual([]);
+    expect(suggestFullNames("", CATALOG)).toEqual([]);
   });
 
   it("classifies an integration placeholder separately from a missing category", () => {
@@ -236,6 +294,43 @@ describe("summarizeReconcile / isCompliant", () => {
     expect(summarizeReconcile(res)).toContain("integration placeholder");
     // The entry IS as compliant as this tool can make it.
     expect(isCompliant(res)).toBe(true);
+  });
+
+  it("blames the session, not the registry, when the listing came back empty", () => {
+    const res: ReconcileResponse = {
+      ...base,
+      categoriesListed: 0,
+      unresolved: DECLARED.filter(d => !d.startsWith("@")).map(raw => ({
+        raw, id: null, fullName: null, reason: "listing_empty" as const,
+      })),
+    };
+    const text = summarizeReconcile(res);
+    expect(text).toContain("no categories for this partner");
+    expect(text).toContain("cannot list categories");
+    // The four names individually would be noise around the one fact.
+    expect(text).not.toContain("not_found");
+    expect(isCompliant(res)).toBe(false);
+  });
+
+  it("says how many categories it checked against, so not_found is falsifiable", () => {
+    const text = summarizeReconcile({
+      ...base,
+      categoriesListed: 204,
+      unresolved: [{ raw: "vod_sources", id: null, fullName: null, reason: "not_found" as const }],
+    });
+    expect(text).toContain("checked against 204 categories");
+  });
+
+  it("surfaces a suggestion inline", () => {
+    const text = summarizeReconcile({
+      ...base,
+      categoriesListed: 12,
+      unresolved: [{
+        raw: "vod_sources", id: null, fullName: null,
+        reason: "not_found" as const, suggestions: ["Agentics>VOD Sources"],
+      }],
+    });
+    expect(text).toContain("did you mean Agentics>VOD Sources?");
   });
 
   it("does not call an entry compliant when a real category is missing", () => {

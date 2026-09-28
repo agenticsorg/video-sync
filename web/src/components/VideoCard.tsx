@@ -177,7 +177,9 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
    *  line, shown next to the button so the outcome doesn't require a
    *  trip to the event log. */
   const [fixingCategories, setFixingCategories] = useState(false);
-  const [categoryFixResult, setCategoryFixResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [categoryFixResult, setCategoryFixResult] = useState<
+    { ok: boolean; text: string; sample?: string[] } | null
+  >(null);
   /** YouTube grant state, so an expired authorisation is visible in the
    *  publish preview rather than discovered mid-upload. Seeded from the
    *  shared cache so a second card costs no request. */
@@ -1282,7 +1284,7 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
     try {
       const res = await reconcileKalturaCategories({ entryId, declared });
       const summary = summarizeReconcile(res);
-      setCategoryFixResult({ ok: isCompliant(res), text: summary });
+      setCategoryFixResult({ ok: isCompliant(res), text: summary, sample: res.availableSample });
       onEvent(
         `KalturaCategoriesReconciled: "${video.title}"${dateTag(video.recorded_at)} — ${entryId}: ${summary}`,
         { video_id: video.id },
@@ -4407,6 +4409,19 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
             }}
           >
             {categoryFixResult.text}
+            {/* What the partner actually has. Sent only when something
+                failed to resolve, and the fastest way to see whether
+                the registry names are merely spelled differently. */}
+            {categoryFixResult.sample && categoryFixResult.sample.length > 0 && (
+              <details style={{ display: "inline" }}>
+                <summary style={{ cursor: "pointer", display: "inline" }}>
+                  {" "}· categories on this partner
+                </summary>
+                <span style={{ color: "var(--text-muted)" }}>
+                  {" "}{categoryFixResult.sample.join(" · ")}
+                </span>
+              </details>
+            )}
           </span>
         )}
         {/* ADR-075 Phase 2 — Drive folder destination(s) from the series.
