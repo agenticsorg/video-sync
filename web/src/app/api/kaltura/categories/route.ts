@@ -36,10 +36,16 @@ const CATEGORY_PAGE_SIZE = 500;
  *  targeted lookup, not a full listing; the response says so rather
  *  than silently resolving against a truncated catalog. */
 const MAX_CATEGORY_PAGES = 8;
-/** How many existing category names to echo back when a declared name
- *  fails to resolve. Enough to recognise the naming scheme, few enough
- *  to read in a result line. */
-const SAMPLE_SIZE = 25;
+/**
+ * How many existing category names to echo back when a declared name
+ * fails to resolve.
+ *
+ * Was 25, which truncated a 28-category partner and hid exactly the
+ * three names we then had to redeploy to see. The cap exists to bound
+ * a pathological partner, not to summarise a normal one, so it sits
+ * well above any realistic category count.
+ */
+const SAMPLE_SIZE = 200;
 
 /**
  * Every category on the partner account.

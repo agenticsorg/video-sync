@@ -167,13 +167,26 @@ describe("suggestFullNames", () => {
     expect(suggestFullNames("", CATALOG)).toEqual([]);
   });
 
-  it("classifies an integration placeholder separately from a missing category", () => {
-    // @zoomCategory@ is substituted by Kaltura's Zoom connector at
-    // ingest. No external caller can apply it, so calling it
-    // "not_found" would put a permanent false failure on three series.
+  it("resolves @zoomCategory@ when the partner really has it", () => {
+    // The correction. This module first refused any @token@ name as an
+    // unexpandable Zoom-connector template. The partner's own listing
+    // disproved that: @zoomCategory@ and @zoomWebinarCategory@ are real
+    // categories, created by a connector configured with an
+    // unsubstituted template. Refusing them applied nothing and blamed
+    // the registry for being right.
+    const withToken = [...CATALOG, { id: 200, name: "@zoomCategory@", fullName: "@zoomCategory@" }];
+    expect(resolveDeclaredCategory("@zoomCategory@", withToken).id).toBe(200);
+  });
+
+  it("keeps the token shape as a hint only when the name is absent", () => {
     const r = resolveDeclaredCategory("@zoomCategory@", CATALOG);
     expect(r.id).toBeNull();
     expect(r.reason).toBe("template");
+  });
+
+  it("prefers listing_empty over the token hint", () => {
+    // An empty listing explains the miss; the name's shape does not.
+    expect(resolveDeclaredCategory("@zoomCategory@", []).reason).toBe("listing_empty");
   });
 
   it("recognises template tokens but not ordinary names containing @", () => {
@@ -289,11 +302,18 @@ describe("summarizeReconcile / isCompliant", () => {
     expect(summarizeReconcile(base)).toBe("nothing to do");
   });
 
-  it("explains a template token rather than counting it as a failure", () => {
+  it("points an absent token at the connector config, and still counts it against compliance", () => {
     const res = { ...base, unresolved: [{ raw: "@zoomCategory@", id: null, fullName: null, reason: "template" as const }] };
-    expect(summarizeReconcile(res)).toContain("integration placeholder");
-    // The entry IS as compliant as this tool can make it.
-    expect(isCompliant(res)).toBe(true);
+    expect(summarizeReconcile(res)).toContain("unsubstituted integration placeholder");
+    // Previously excused as "not applicable". A declared category that
+    // could not be applied leaves the entry short of what the series
+    // asked for, whatever the reason.
+    expect(isCompliant(res)).toBe(false);
+  });
+
+  it("is compliant only when nothing is left unresolved", () => {
+    expect(isCompliant(base)).toBe(true);
+    expect(isCompliant({ ...base, added: [{ raw: "vod_sources", id: 103, fullName: "vod_sources" }] })).toBe(true);
   });
 
   it("blames the session, not the registry, when the listing came back empty", () => {

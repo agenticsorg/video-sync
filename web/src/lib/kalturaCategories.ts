@@ -35,11 +35,25 @@
  *    added by hand. A fixup that quietly destroys manual work is worse
  *    than no fixup.
  *
- * 3. Unresolvable values are reported, never guessed at. `@zoomCategory@`
- *    is a Kaltura Zoom-connector template token, substituted by that
- *    integration at ingest; no external caller can apply it. Treating
- *    it as a missing category would put a permanent false failure on
- *    three series, so it gets its own reason and its own wording.
+ * 3. Unresolvable values are reported, never guessed at.
+ *
+ * ── Correction, after the first live run ─────────────────────────────
+ * This module originally refused any `@token@` name outright, on the
+ * reasoning that `@zoomCategory@` is a Kaltura Zoom-connector template
+ * that only that integration can expand. The partner's own category
+ * list disproved it: `@zoomCategory@` and `@zoomWebinarCategory@` are
+ * REAL categories, sitting alongside 21 auto-created `ep_private_*` /
+ * `ep_agenda_*` pairs. The connector was configured with an
+ * unsubstituted template and created categories named after the literal
+ * token. The registry entry was right; the refusal was wrong.
+ *
+ * So an `@token@` name now resolves against the listing like any other.
+ * The shape is kept only as a HINT on failure — if such a name is
+ * absent, saying "this looks like an unsubstituted placeholder" is more
+ * use than a bare not_found. It no longer excuses the value from
+ * counting against compliance, because a declared category that cannot
+ * be applied leaves the entry short of what the series asked for,
+ * whatever the reason.
  */
 
 import type { DestinationSpec } from "./youtubeTitleAlign";
@@ -145,9 +159,6 @@ export function resolveDeclaredCategory(
   catalog: KalturaCategory[],
 ): CategoryResolution {
   const trimmed = raw.trim();
-  if (TEMPLATE_TOKEN_RE.test(trimmed)) {
-    return { raw, id: null, fullName: null, reason: "template" };
-  }
   // A bare integer is an id. `Number("")` is 0 and `Number(" 12 ")` is
   // 12, so test the shape rather than trusting the coercion — that
   // exact over-trust is what emptied the array in the adapter.
@@ -175,6 +186,11 @@ export function resolveDeclaredCategory(
   // point the reader at the registry when the fault is the session.
   if (catalog.length === 0) {
     return { raw, id: null, fullName: null, reason: "listing_empty" };
+  }
+  // Only now is the token shape worth mentioning: the name did not
+  // match any category, and its shape says why it might not exist.
+  if (TEMPLATE_TOKEN_RE.test(trimmed)) {
+    return { raw, id: null, fullName: null, reason: "template" };
   }
   const suggestions = suggestFullNames(raw, catalog);
   return {
@@ -308,7 +324,9 @@ export function summarizeReconcile(res: ReconcileResponse): string {
     }
   }
   if (templates.length) {
-    parts.push(`${templates.map(t => t.raw).join(", ")} is an integration placeholder — not applicable`);
+    parts.push(
+      `${templates.map(t => t.raw).join(", ")} not found and looks like an unsubstituted integration placeholder — check the connector config in the KMC`,
+    );
   }
   return parts.length ? parts.join("; ") : "nothing to do";
 }
@@ -316,11 +334,14 @@ export function summarizeReconcile(res: ReconcileResponse): string {
 /**
  * True when the reconcile left the entry in the declared state.
  *
- * A template token is the only unresolved reason that still counts as
- * compliant — it is not applicable rather than not applied.
+ * Every unresolved value counts against it. An earlier version excused
+ * `template` as "not applicable", on the belief that `@zoomCategory@`
+ * could never be a real category; the partner's listing showed it is
+ * one. There is no reason a declared category can go unapplied and the
+ * entry still be in the state the series asked for.
  */
 export function isCompliant(res: ReconcileResponse): boolean {
-  return res.failed.length === 0 && res.unresolved.every(u => u.reason === "template");
+  return res.failed.length === 0 && res.unresolved.length === 0;
 }
 
 /** Client-side call into the route. */
