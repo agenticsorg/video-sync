@@ -44,7 +44,7 @@ interface KalturaEntry {
 }
 
 async function handler(req: NextRequest) {
-  let body: { partnerId?: string; adminSecret?: string; from?: string; to?: string };
+  let body: { partnerId?: string; adminSecret?: string; from?: string; to?: string; entryIds?: string[] };
   try {
     body = await req.json();
   } catch {
@@ -83,8 +83,20 @@ async function handler(req: NextRequest) {
     statusEqual: 2, // READY
     objectType: "KalturaMediaEntryFilter",
   };
-  if (body.from) filter.createdAtGreaterThanOrEqual = Math.floor(new Date(body.from).getTime() / 1000);
-  if (body.to) filter.createdAtLessThanOrEqual = Math.floor(new Date(body.to + "T23:59:59Z").getTime() / 1000);
+  // Explicit entry ids take precedence over the date window. The
+  // origin backfill needs specific entries, and `createdAt` is the
+  // ingest time rather than the recording time, so a date window is
+  // the wrong way to find them.
+  const entryIds = (body.entryIds ?? []).filter(id => /^[0-9]+_[A-Za-z0-9]+$/.test(id));
+  if (entryIds.length > 0) {
+    filter.idIn = entryIds.join(",");
+    // A specific entry is wanted whatever its status — an errored or
+    // still-converting entry still has the referenceId we came for.
+    delete filter.statusEqual;
+  } else {
+    if (body.from) filter.createdAtGreaterThanOrEqual = Math.floor(new Date(body.from).getTime() / 1000);
+    if (body.to) filter.createdAtLessThanOrEqual = Math.floor(new Date(body.to + "T23:59:59Z").getTime() / 1000);
+  }
 
   let raw: unknown;
   try {

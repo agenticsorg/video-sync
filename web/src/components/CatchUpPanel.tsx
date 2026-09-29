@@ -27,6 +27,14 @@ import { runYouTubeTitleAlignBackfill, findRecordsNeedingTitleAlignment, findRec
 import { getSeriesRegistry } from "../lib/seriesRegistryClient";
 import type { SeriesRegistryEntry } from "../lib/youtubeTitleAlign";
 import { findOrphanClips, runOrphanClipsRepair, type OrphanRepairProgressEvent } from "../lib/orphanClipsRepair";
+import {
+  findRecordsNeedingOriginBackfill,
+  findOriginMergePairs,
+  runKalturaOriginBackfill,
+  runKalturaOriginMerge,
+  type OriginBackfillProgressEvent,
+  type OriginMergeProgressEvent,
+} from "../lib/kalturaOriginMerge";
 import { findDuplicateClusters, runCatalogDedupe, type DedupeProgressEvent } from "../lib/catalogDedupe";
 import { discoverOpusProjects, parseProjectIds, getOpusApiKey, findClipsMissingKeywords, refreshOpusKeywords, type DiscoverProgressEvent, type KeywordsRefreshProgressEvent } from "../lib/opusClipsDiscovery";
 import DescriptionSyncPanel from "./DescriptionSyncPanel";
@@ -519,6 +527,61 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
       onEvent?.(`Opus discovery errored: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setDiscoveringOpus(false);
+    }
+  }
+
+  // Kaltura origin recovery. Two steps, deliberately separate: the
+  // backfill only READS Kaltura and writes provenance, the merge
+  // retires rows. An operator should be able to do the first and look
+  // at the result before consenting to the second.
+  const [originBackfilling, setOriginBackfilling] = useState(false);
+  const [originBackfillProgress, setOriginBackfillProgress] = useState<{ index: number; total: number } | null>(null);
+  const [originBackfillSummary, setOriginBackfillSummary] =
+    useState<{ zoom_origin: number; recorded: number; not_found: number; errors: number } | null>(null);
+  const [originMerging, setOriginMerging] = useState(false);
+  const [originMergeProgress, setOriginMergeProgress] = useState<{ index: number; total: number } | null>(null);
+  const [originMergeSummary, setOriginMergeSummary] =
+    useState<{ merged: number; location_only: number; already: number; errors: number } | null>(null);
+  const originBackfillCount = useMemo(() => findRecordsNeedingOriginBackfill(videos).length, [videos]);
+  const originMergeCount = useMemo(() => findOriginMergePairs(videos).length, [videos]);
+
+  async function runOriginBackfill() {
+    setOriginBackfilling(true);
+    setOriginBackfillSummary(null);
+    setOriginBackfillProgress(null);
+    try {
+      await runKalturaOriginBackfill(
+        actorState,
+        (ev: OriginBackfillProgressEvent) => {
+          if (ev.type === "item_done" && ev.index) setOriginBackfillProgress({ index: ev.index, total: ev.total });
+          else if (ev.type === "complete" && ev.totals) { setOriginBackfillSummary(ev.totals); setOriginBackfillProgress(null); }
+        },
+        onEvent,
+      );
+    } catch (err) {
+      onEvent?.(`Kaltura origin backfill errored: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setOriginBackfilling(false);
+    }
+  }
+
+  async function runOriginMerge() {
+    setOriginMerging(true);
+    setOriginMergeSummary(null);
+    setOriginMergeProgress(null);
+    try {
+      await runKalturaOriginMerge(
+        actorState,
+        (ev: OriginMergeProgressEvent) => {
+          if (ev.type === "item_done" && ev.index) setOriginMergeProgress({ index: ev.index, total: ev.total });
+          else if (ev.type === "complete" && ev.totals) { setOriginMergeSummary(ev.totals); setOriginMergeProgress(null); }
+        },
+        onEvent,
+      );
+    } catch (err) {
+      onEvent?.(`Kaltura origin merge errored: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setOriginMerging(false);
     }
   }
 
@@ -1370,6 +1433,68 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
                 Last run: {dedupeSummary.losers_abandoned} abandoned ·{" "}
                 {dedupeSummary.losers_manual} need manual walk-back ·{" "}
                 {dedupeSummary.errors} error{dedupeSummary.errors === 1 ? "" : "s"}.
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Kaltura origin recovery (ADR-080 follow-up). Kaltura's Zoom
+            connector ingests Zoom recordings automatically, and the
+            Kaltura importer then created a SECOND record for the same
+            event — role Origin, asserting Kaltura is the source. It is
+            not. The connector's referenceId carries the Zoom meeting
+            UUID, so the pairing is an identity match, not a guess. */}
+        <div style={{
+          marginTop: 12, padding: 10,
+          background: "rgba(99,102,241,0.05)", border: "1px solid rgba(99,102,241,0.28)", borderRadius: 4,
+          fontSize: "0.82rem",
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>🔗 Kaltura origin recovery</div>
+          <div style={{ color: "var(--text-muted)", marginBottom: 8 }}>
+            Kaltura&apos;s Zoom connector stamps every entry it ingests with the Zoom meeting UUID and the real
+            recording start (<code>Zoom_&lt;uuid&gt;&lt;instant&gt;</code>). The importer used to discard it, so
+            Kaltura-sourced records carry no link to the meeting they came from and their{" "}
+            <code>recorded_at</code> is Kaltura&apos;s <em>ingest</em> time — hours late.
+            <br />
+            <strong>Step 1</strong> reads Kaltura and writes the provenance back, correcting{" "}
+            <code>recorded_at</code> where the connector supplies a real start.{" "}
+            <strong>Step 2</strong> moves the Kaltura entry onto the Zoom record as a Destination and retires
+            the duplicate row. Step 2 only ever touches pairs step 1 has proven.
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              className="btn btn-sm btn-primary"
+              onClick={runOriginBackfill}
+              disabled={originBackfilling || originBackfillCount === 0}
+              title="Fetch each Kaltura entry's referenceId in one batched call, record the Zoom origin, and correct recorded_at. Reads Kaltura; writes only metadata."
+            >
+              {originBackfilling
+                ? originBackfillProgress ? `Reading ${originBackfillProgress.index}/${originBackfillProgress.total}…` : "Reading…"
+                : `1. Recover origins${originBackfillCount ? ` (${originBackfillCount})` : ""}`}
+            </button>
+            <button
+              className="btn btn-sm"
+              onClick={runOriginMerge}
+              disabled={originMerging || originMergeCount === 0}
+              title="Attach each Kaltura entry to its Zoom record as a Destination, then retire the duplicate Kaltura row. Records that are mid-publish keep their row and are reported."
+            >
+              {originMerging
+                ? originMergeProgress ? `Merging ${originMergeProgress.index}/${originMergeProgress.total}…` : "Merging…"
+                : `2. Merge into Zoom records${originMergeCount ? ` (${originMergeCount})` : ""}`}
+            </button>
+            {originBackfillSummary && (
+              <span style={{ color: "var(--text-muted)" }}>
+                Recovered: {originBackfillSummary.zoom_origin} from Zoom ·{" "}
+                {originBackfillSummary.recorded} other ·{" "}
+                {originBackfillSummary.not_found} not on Kaltura ·{" "}
+                {originBackfillSummary.errors} error{originBackfillSummary.errors === 1 ? "" : "s"}.
+              </span>
+            )}
+            {originMergeSummary && (
+              <span style={{ color: "var(--text-muted)" }}>
+                Merged: {originMergeSummary.merged} ·{" "}
+                {originMergeSummary.location_only} linked but not retired ·{" "}
+                {originMergeSummary.errors} error{originMergeSummary.errors === 1 ? "" : "s"}.
               </span>
             )}
           </div>

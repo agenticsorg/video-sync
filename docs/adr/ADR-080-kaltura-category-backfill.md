@@ -173,3 +173,48 @@ It is deliberately **not** in Phase 1: it needs a Rust schema change plus a WASM
 - **ADR-075**: where `category_ids` is declared and edited.
 - **ADR-077**: per-destination outcomes; §5 is where §5 above extends, §6 is where conformance eventually lands.
 - **ADR-079**: the advance-to-published pipeline, which the adapter's category step now runs inside.
+
+---
+
+## Addendum: The Origin-Role Rationale Was Wrong (2026-09-29)
+
+**Addendum to**: §1's deferral of `Origin`-role entries, and the Phase 3 row.
+
+§1 defers the 11 `Origin`-role Kaltura entries on the grounds that *"an Origin entry is one that already existed on the partner and which the app merely indexed — writing to it is a change to content the app does not own."*
+
+That reasoning does not survive contact with the data. The KMC shows entry `1_b8kw2g8u` carrying:
+
+```
+Reference ID: Zoom_B7JsLl3USqCiZtsrC0FvKw==2026-09-25T15:45:02Z
+```
+
+Kaltura's Zoom connector stamps every entry it ingests with the Zoom meeting UUID and the recording start. These are not third-party uploads — they are **the org's own Zoom recordings**, which reached Kaltura by the connector rather than by this tool. There is no ownership question to defer on.
+
+### What was actually wrong
+
+Not the deferral, but the model underneath it. A Kaltura-imported record is stored with `role: Origin`, which asserts Kaltura is where the content originated. For a connector-ingested entry that is false, and it produced a second catalog record for an event the catalog may already hold as a Zoom row.
+
+Two consequences, neither previously recorded:
+
+1. **`recorded_at` was Kaltura's `createdAt`** — the ingest time. `1_b8kw2g8u` is stored as `2026-09-25T18:13:49Z` for a recording that started at `15:45:02Z`, two and a half hours out. ADR-048's date gates, ADR-060's show windows and the Overview all read that field.
+
+2. **The ADR-044 presence sweep reported these entries `absent`.** It matches `filter[referenceIdIn]` against our catalog UUIDs, then falls back to the ADR-022 description footer. A connector-created entry has neither, so the card invited a publish of a recording Kaltura demonstrably already held — the catalog record had been *built from that entry*. ADR-044 §Context item 2 predicted this shape; the cause was not what it guessed.
+
+### Resolved
+
+ADR-044 deferred origin matching for such entries to *"fuzzy title + recorded-at match"*. No fuzzy match is needed and none should be used while the reference id is present: our Zoom records are keyed `source_id: "zoom-<UUID>"` on exactly the base64 form the connector writes, so the pairing is **identity**.
+
+Shipped 2026-09-29:
+
+- `lib/kalturaZoomOrigin.ts` parses the reference id and classifies it `ours` (a catalog UUID, ADR-044) / `zoom` / `foreign` / `absent`. The parser anchors on the trailing ISO instant rather than splitting on `==`, which is base64 padding — real UUIDs in the catalog contain `/` and `+`.
+- `/api/kaltura/list` captures `referenceId`, `adminTags` and `categoriesIds`, which it had been receiving from `media.list` and discarding, and gained an `entryIds` mode so specific entries can be fetched in one batched call.
+- `lib/kalturaOriginMerge.ts` + a Maintain card: **step 1** recovers the provenance and corrects `recorded_at`; **step 2** attaches the entry to the Zoom record as a `Destination` and retires the duplicate row.
+- Presence resolution now treats **any** Kaltura location as proof of presence, not only `Destination` — `lib/backfill.ts` and the card's `alreadyOnKaltura`.
+
+**Merge, not link,** on the operator's decision. One record per event, with every platform holding a copy listed as a location, is the correct end state; linking would have left two rows asserting the same event. The driver adds the location *before* retiring the row, so a failure leaves a recoverable duplicate rather than losing the only record naming the entry, and it refuses to retire anything in `Approved` / `Publishing` / `ToRetry` / `Published` — those report `location_only` and wait for a human.
+
+### What this changes about Phase 3
+
+Phase 3 is no longer "should we write to content we don't own". The remaining question is narrower and empirical: **after the merge, which Kaltura entries still lack their series' categories?** Some will need nothing — the connector already files its entries into `@zoomCategory@` and the per-event roots. The Phase 3 row should be read as *"apply §1's category reconcile to entries that arrived via the connector"*, and it cannot be sized until step 1 has run.
+
+The §1 paragraph beginning "The distinction matters" is superseded by this addendum.

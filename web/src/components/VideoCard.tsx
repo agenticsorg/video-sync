@@ -2480,9 +2480,11 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
   // record published anywhere.
   const hasPairedBroadcast = pairedBroadcasts.length > 0;
   const alreadyPublished = alreadyPublishedLocation || hasPairedBroadcast;
-  const alreadyOnKaltura = (video.locations ?? []).some(
-    (l) => l.role === "Destination" && l.platform === "Kaltura"
-  );
+  // Any Kaltura location, not just a Destination. A record IMPORTED
+  // FROM Kaltura carries role Origin, and offering "Publish to
+  // Kaltura" for it invites a second copy of a recording we
+  // demonstrably know is already there — we built the record from it.
+  const alreadyOnKaltura = (video.locations ?? []).some((l) => l.platform === "Kaltura");
   // The Kaltura side-publish button is offered when the catalog already
   // shows a YouTube destination (or is post-Published) but Kaltura is
   // missing. Kaltura must be configured in Connections.
@@ -2524,7 +2526,12 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
    *  regardless of status: the 19 Kaltura entries in the catalog all
    *  predate any working category application, and most sit Published. */
   const declaredKalturaCats = declaredKalturaCategories(resolvedDests.destinations);
-  const canFixKalturaCategories = alreadyOnKaltura && declaredKalturaCats.length > 0;
+  // Gated on a Kaltura DESTINATION specifically, which is what
+  // kalturaEntryId resolves — broadening alreadyOnKaltura above must
+  // not light up a button whose handler would find no entry and
+  // return silently.
+  const kalturaEntryForCategories = kalturaEntryId(video.locations);
+  const canFixKalturaCategories = kalturaEntryForCategories !== null && declaredKalturaCats.length > 0;
   const driveDests   = resolvedDests.destinations.filter((d): d is Extract<import("../lib/youtubeTitleAlign").DestinationSpec, { platform: "GoogleDrive" }> => d.platform === "GoogleDrive");
   const otherDests   = resolvedDests.destinations.filter((d): d is Extract<import("../lib/youtubeTitleAlign").DestinationSpec, { platform: "Other" }> => d.platform === "Other");
   // A destination is "in-scope for the card's action row" when the

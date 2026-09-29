@@ -3,6 +3,7 @@
  * ADR-016 — Retrospective Backfill Uploader (MVP + Tier 1).
  */
 
+import { kalturaWatchUrl } from "./urlResolver";
 import type { VideoRecordJSON } from "./wasm";
 import { loadProcessingRules, applyProcessingRules, type PublishAttributes } from "./processingRules";
 
@@ -245,10 +246,27 @@ function classifyDestinationUrl(url: string): "youtube" | "kaltura" | "unknown" 
 
 function videoSlotPayload(v: VideoRecordJSON): NonNullable<CalendarSlot["video"]> {
   const ytLoc = v.locations?.find(l => l.platform === "YouTube" && l.role === "Destination");
-  const kalLoc = v.locations?.find(l => l.platform === "Kaltura" && l.role === "Destination");
+  // ADR-044 gap: a record IMPORTED FROM Kaltura carries role Origin,
+  // not Destination. Matching only Destination meant the lozenge fell
+  // through to the presence sweep, which matches referenceId against
+  // our catalog UUIDs and then the ADR-022 footer — a connector-
+  // ingested entry has neither, so it reported "absent" and the card
+  // invited a publish of a recording Kaltura demonstrably already has
+  // (we imported the record FROM it). Any Kaltura location is proof of
+  // presence; Destination is preferred only because its URL is the one
+  // we wrote.
+  const kalLoc = v.locations?.find(l => l.platform === "Kaltura" && l.role === "Destination")
+    ?? v.locations?.find(l => l.platform === "Kaltura");
   const ytFromLoc = ytLoc?.external_url
     ?? (ytLoc?.external_id ? `https://www.youtube.com/watch?v=${ytLoc.external_id}` : undefined);
-  const kalFromLoc = kalLoc?.external_url ?? undefined;
+  // An Origin location's external_url is the `kaltura://entry/<id>`
+  // pseudo-URL, which is not navigable. Derive the portal watch URL
+  // from the entry id instead of surfacing a dead link.
+  const kalFromLoc = kalLoc
+    ? (kalLoc.external_url && kalLoc.external_url.startsWith("http")
+        ? kalLoc.external_url
+        : kalturaWatchUrl(kalLoc.external_id))
+    : undefined;
 
   // Legacy single destination_url field — older records that pre-date the
   // locations[] design. Classify by URL host so a Kaltura URL doesn't get
