@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
 import { downloadFromSource } from "../../../../lib/sourceDownload";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
+import { kalturaWatchUrl } from "../../../../lib/urlResolver";
 import { promises as fs, openAsBlob, statSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -37,7 +38,6 @@ interface KalturaUploadRequest {
   ytCookies?: string;
   // Kaltura-specific
   categoryIds?: number[];
-  uiConfId?: number;
 }
 
 const KALTURA_BASE = "https://www.kaltura.com/api_v3";
@@ -218,10 +218,9 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       },
     });
 
-    const uiConfId = body.uiConfId ?? 0;
-    const playerUrl = uiConfId > 0
-      ? `https://cdnapisec.kaltura.com/p/${partnerId}/sp/${partnerId}00/embedIframeJs/uiconf_id/${uiConfId}/partner_id/${partnerId}?iframeembed=true&entry_id=${entryId}`
-      : `https://www.kaltura.com/index.php/extwidget/preview/partner_id/${partnerId}/uiconf_id/0/entry_id/${entryId}/embed/iframe`;
+    // The org watches entries on its MediaSpace portal, not on
+    // kaltura.com. One shape for every caller — see kalturaWatchUrl.
+    const playerUrl = kalturaWatchUrl(entryId);
 
     return NextResponse.json({
       entryId,

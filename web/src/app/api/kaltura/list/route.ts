@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
+import { kalturaWatchUrl } from "../../../../lib/urlResolver";
 
 // Dynamic — calls Kaltura API.
 export const dynamic = "force-dynamic";
@@ -137,7 +138,7 @@ async function handler(req: NextRequest) {
     // needs an integer (u32). Round here so every consumer gets a clean int.
     const duration = Math.max(0, Math.round(Number(e.duration ?? 0)));
     const tagsRaw = String(e.tags ?? "");
-    const playerUrl = `https://cdnapisec.kaltura.com/p/${partnerId}/sp/${partnerId}00/embedIframeJs/uiconf_id/0/partner_id/${partnerId}?iframeembed=true&entry_id=${id}`;
+    const playerUrl = kalturaWatchUrl(id);
     return {
       id,
       name: String(e.name ?? "Untitled"),

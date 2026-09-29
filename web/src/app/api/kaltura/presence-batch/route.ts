@@ -31,6 +31,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
+import { kalturaWatchUrl } from "../../../../lib/urlResolver";
 
 export const dynamic = "force-dynamic";
 
@@ -110,8 +111,8 @@ function classify(entry: KalturaMediaEntry): PresenceState {
   return "absent";
 }
 
-function playerUrlFor(entryId: string, partnerId: string): string {
-  return `https://cdnapisec.kaltura.com/p/${partnerId}/sp/${partnerId}00/embedIframeJs/uiconf_id/0/partner_id/${partnerId}?iframeembed=true&entry_id=${entryId}`;
+function playerUrlFor(entryId: string, _partnerId: string): string {
+  return kalturaWatchUrl(entryId);
 }
 
 // Parse the ADR-022 footer marker "catalog:<uuid>" out of an entry description.

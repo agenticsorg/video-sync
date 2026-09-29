@@ -96,9 +96,38 @@ export interface CategoryResolution {
   fullName: string | null;
   /** Why `id` is null. Absent on a successful resolution. */
   reason?: ResolutionReason;
-  /** Close names from the listing, when `reason` is `not_found`. The
-   *  answer to "then what IS it called?" without a second round trip. */
+  /** Close names when `reason` is `not_found`, or the competing full
+   *  names when it is `ambiguous`. The answer to "then what IS it
+   *  called?" / "which one?" without a second round trip. */
   suggestions?: string[];
+  /** How many categories an ambiguous name matched. */
+  matchCount?: number;
+}
+
+/** How many competing full names to name on an ambiguous match. */
+const AMBIGUOUS_CANDIDATE_LIMIT = 6;
+
+/**
+ * An ambiguous match, carrying the competing full names.
+ *
+ * Reporting bare "ambiguous" left the operator with nothing to act on.
+ * `vod_sources` matched 11 categories on partner 5896392 — one under
+ * each per-event root (`2361952EPea2653e>vod_sources`,
+ * `2605993EPfcb518c>vod_sources`, …) — and the only way to resolve it
+ * is to see them and pick a full path. A diagnosis that does not name
+ * the alternatives just moves the dead end.
+ */
+function ambiguousAmong(raw: string, matches: KalturaCategory[]): CategoryResolution {
+  const shown = matches.slice(0, AMBIGUOUS_CANDIDATE_LIMIT).map(c => c.fullName);
+  const extra = matches.length - shown.length;
+  return {
+    raw,
+    id: null,
+    fullName: null,
+    reason: "ambiguous",
+    suggestions: extra > 0 ? [...shown, `…and ${extra} more`] : shown,
+    matchCount: matches.length,
+  };
 }
 
 /** Words, lowercased, punctuation dropped. "Agentics.org Video Portal"
@@ -173,14 +202,14 @@ export function resolveDeclaredCategory(
     return { raw, id: byFullName[0].id, fullName: byFullName[0].fullName };
   }
   if (byFullName.length > 1) {
-    return { raw, id: null, fullName: null, reason: "ambiguous" };
+    return ambiguousAmong(raw, byFullName);
   }
   const byName = catalog.filter(c => c.name.trim().toLowerCase() === needle);
   if (byName.length === 1) {
     return { raw, id: byName[0].id, fullName: byName[0].fullName };
   }
   if (byName.length > 1) {
-    return { raw, id: null, fullName: null, reason: "ambiguous" };
+    return ambiguousAmong(raw, byName);
   }
   // Nothing to have matched against. Reporting "not_found" here would
   // point the reader at the registry when the fault is the session.
@@ -318,6 +347,12 @@ export function summarizeReconcile(res: ReconcileResponse): string {
     parts.push(
       `${missing.length} unresolved: ${missing
         .map(m => {
+          if (m.reason === "ambiguous") {
+            // Name the competitors and say how many, so the fix —
+            // putting a full path in the registry — is obvious.
+            const list = m.suggestions?.length ? `: ${m.suggestions.join(" / ")}` : "";
+            return `${m.raw} matches ${m.matchCount ?? "several"} categories, use a full path${list}`;
+          }
           const hint = m.suggestions?.length ? ` — did you mean ${m.suggestions.join(" / ")}?` : "";
           return `${m.raw} (${m.reason})${hint}`;
         })

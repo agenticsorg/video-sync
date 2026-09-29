@@ -93,7 +93,11 @@ describe("resolveDeclaredCategory", () => {
     expect(resolveDeclaredCategory("  VOD_SOURCES ", CATALOG).id).toBe(103);
   });
 
-  it("refuses to guess when a leaf name is ambiguous", () => {
+  it("refuses to guess when a leaf name is ambiguous, and names the competitors", () => {
+    // "vod_sources" matched 11 categories on partner 5896392 — one
+    // under each per-event root. Reporting bare "ambiguous" left the
+    // operator with nothing to act on; the only fix is to see them
+    // and pick a full path.
     const ambiguous: KalturaCategory[] = [
       { id: 1, name: "Recordings", fullName: "A>Recordings" },
       { id: 2, name: "Recordings", fullName: "B>Recordings" },
@@ -101,6 +105,31 @@ describe("resolveDeclaredCategory", () => {
     const r = resolveDeclaredCategory("Recordings", ambiguous);
     expect(r.id).toBeNull();
     expect(r.reason).toBe("ambiguous");
+    expect(r.matchCount).toBe(2);
+    expect(r.suggestions).toEqual(["A>Recordings", "B>Recordings"]);
+  });
+
+  it("caps the competitor list rather than printing eleven paths", () => {
+    const many: KalturaCategory[] = Array.from({ length: 11 }, (_, i) => ({
+      id: i + 1, name: "vod_sources", fullName: `${1000 + i}EPabc>vod_sources`,
+    }));
+    const r = resolveDeclaredCategory("vod_sources", many);
+    expect(r.matchCount).toBe(11);
+    expect(r.suggestions).toHaveLength(7); // 6 shown + the "and N more" marker
+    expect(r.suggestions?.at(-1)).toBe("…and 5 more");
+  });
+
+  it("tells the operator to use a full path", () => {
+    const text = summarizeReconcile({
+      entryId: "1_yhs8i4rb", added: [], alreadyPresent: [], failed: [],
+      categoriesListed: 163,
+      unresolved: [{
+        raw: "vod_sources", id: null, fullName: null, reason: "ambiguous",
+        matchCount: 11, suggestions: ["2361952EPea2653e>vod_sources", "…and 10 more"],
+      }],
+    });
+    expect(text).toContain("matches 11 categories, use a full path");
+    expect(text).toContain("2361952EPea2653e>vod_sources");
   });
 
   it("reports an unknown name as not_found", () => {
