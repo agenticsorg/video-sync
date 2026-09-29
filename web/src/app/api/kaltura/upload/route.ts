@@ -3,6 +3,7 @@ import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
 import { downloadFromSource } from "../../../../lib/sourceDownload";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
 import { kalturaWatchUrl } from "../../../../lib/urlResolver";
+import { kalturaCall, mintAdminKs, DISABLE_ENTITLEMENT } from "../../../../lib/kalturaApi";
 import { promises as fs, openAsBlob, statSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -41,36 +42,6 @@ interface KalturaUploadRequest {
 }
 
 const KALTURA_BASE = "https://www.kaltura.com/api_v3";
-
-async function kalturaCall(
-  service: string,
-  action: string,
-  params: Record<string, string | number | object>,
-): Promise<Record<string, unknown>> {
-  const body = new URLSearchParams();
-  body.set("format", "1"); // 1 = JSON
-  for (const [k, v] of Object.entries(params)) {
-    if (typeof v === "object" && v !== null) {
-      // Kaltura's "objectType" pattern: flatten nested objects with dotted keys
-      for (const [kk, vv] of Object.entries(v as Record<string, unknown>)) {
-        body.set(`${k}:${kk}`, String(vv));
-      }
-    } else {
-      body.set(k, String(v));
-    }
-  }
-  const res = await fetch(`${KALTURA_BASE}/?service=${service}&action=${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!res.ok) throw new Error(`Kaltura ${service}.${action} HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json() as Record<string, unknown>;
-  if (typeof data === "object" && data && "code" in data && "message" in data) {
-    throw new Error(`Kaltura ${service}.${action} error: ${(data as { code: string; message: string }).code} — ${(data as { code: string; message: string }).message}`);
-  }
-  return data;
-}
 
 async function uploadFileToToken(ks: string, uploadTokenId: string, filePath: string): Promise<void> {
   const sizeMb = statSync(filePath).size / (1024 * 1024);
@@ -142,25 +113,21 @@ async function handler(req: NextRequest): Promise<NextResponse> {
   });
 
   try {
-    // 1. Mint admin Kaltura Session
-    const sessionRes = await kalturaCall("session", "start", {
-      partnerId,
-      secret: adminSecret,
-      type: 2, // ADMIN session
-      userId: "video-sync",
-      expiry: 86400,
-    });
-    // session.start returns the KS as a bare string in JSON
-    const ks = typeof sessionRes === "string" ? sessionRes : (sessionRes as { result?: string }).result || "";
-    // Some Kaltura responses wrap the string at the top level — handle both.
-    const ksValue: string = typeof sessionRes === "string"
-      ? sessionRes
-      : ((sessionRes as Record<string, unknown>)["objectType"] === "KalturaAPIException"
-        ? (() => { throw new Error(`KS mint failed: ${JSON.stringify(sessionRes)}`); })()
-        : ks || JSON.stringify(sessionRes));
-    if (!ksValue || ksValue.length < 10) {
-      throw new Error("Kaltura session.start returned no usable KS");
-    }
+    // 1. Mint admin Kaltura Session.
+    //
+    // disableentitlement: media.add can attach the entry to categories
+    // (body.categoryIds), and an entitled category is closed to a
+    // session that has not asked to bypass the check. The publish path
+    // no longer sends categories here — the adapter applies them via
+    // /api/kaltura/categories afterwards — but the parameter is still
+    // honoured, and a 24h KS that silently cannot touch half the
+    // account is not worth keeping for the sake of a narrower grant.
+    //
+    // Expiry stays 86400: a multi-GB upload can outlive a 1h session.
+    const ksValue = await mintAdminKs(
+      { partnerId, adminSecret },
+      { expiry: 86400, privileges: DISABLE_ENTITLEMENT },
+    );
 
     // 2. Download source media. Per ADR-042, source credentials live in
     //    Secret Manager (shared) and optionally as a browser local override.

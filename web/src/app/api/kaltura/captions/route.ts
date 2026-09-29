@@ -104,8 +104,12 @@ async function handler(req: NextRequest) {
   // 1. KS
   let ks: string;
   try {
+    // disableentitlement: caption assets hang off the entry, so an
+    // entry in an entitled category is unreachable without it and the
+    // record looks as though it has no captions.
     const sessRes = await kalturaPost("session", "start", {
       partnerId, secret: adminSecret, type: 2, userId: "video-sync", expiry: 3600,
+      privileges: "disableentitlement",
     });
     if (typeof sessRes === "string") ks = sessRes;
     else if (sessRes && typeof sessRes === "object" && "result" in sessRes) ks = String((sessRes as { result?: string }).result ?? "");

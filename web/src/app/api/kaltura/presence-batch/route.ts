@@ -31,6 +31,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
+import { kalturaCall, unwrapObjects, mintAdminKs, DISABLE_ENTITLEMENT } from "../../../../lib/kalturaApi";
 import { kalturaWatchUrl } from "../../../../lib/urlResolver";
 
 export const dynamic = "force-dynamic";
@@ -64,39 +65,6 @@ interface KalturaMediaEntry {
   description?: string;
   status?: number;
   mediaType?: number;
-}
-
-async function kalturaCall(
-  service: string,
-  action: string,
-  params: Record<string, string | number | object>,
-): Promise<unknown> {
-  const body = new URLSearchParams();
-  body.set("format", "1");
-  for (const [k, v] of Object.entries(params)) {
-    if (typeof v === "object" && v !== null) {
-      for (const [kk, vv] of Object.entries(v as Record<string, unknown>)) {
-        body.set(`${k}:${kk}`, String(vv));
-      }
-    } else {
-      body.set(k, String(v));
-    }
-  }
-  const res = await fetch(`${KALTURA_BASE}/?service=${service}&action=${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!res.ok) throw new Error(`Kaltura ${service}.${action} ${res.status}: ${await res.text().catch(() => "")}`);
-  return res.json();
-}
-
-function unwrapObjects(v: unknown): KalturaMediaEntry[] {
-  if (!v || typeof v !== "object") return [];
-  const o = v as Record<string, unknown>;
-  if (Array.isArray(o.objects)) return o.objects as KalturaMediaEntry[];
-  if (o.result && typeof o.result === "object") return unwrapObjects(o.result);
-  return [];
 }
 
 function classify(entry: KalturaMediaEntry): PresenceState {
@@ -158,20 +126,12 @@ async function handler(req: NextRequest) {
   // Mint admin KS
   let ks: string;
   try {
-    const sessRes = await kalturaCall("session", "start", {
-      partnerId,
-      secret: adminSecret,
-      type: 2,
-      userId: "video-sync",
-      expiry: 3600,
-    });
-    if (typeof sessRes === "string") ks = sessRes;
-    else if (sessRes && typeof sessRes === "object" && "result" in sessRes) {
-      ks = String((sessRes as { result?: string }).result ?? "");
-    } else {
-      throw new Error(`session.start returned ${JSON.stringify(sessRes).slice(0, 200)}`);
-    }
-    if (!ks || ks.length < 10) throw new Error("session.start returned empty KS");
+    // disableentitlement: an entry published into an entitled
+    // category is invisible to media.list without it. A presence
+    // sweep that cannot see an entry reports it "absent", which
+    // invites a re-publish of a video that is already live — the
+    // most damaging way this omission could surface.
+    ks = await mintAdminKs({ partnerId, adminSecret }, { privileges: DISABLE_ENTITLEMENT });
   } catch (err) {
     serverLog("error", "ext:kaltura-session", "auth failed", { error: String(err), rid });
     return NextResponse.json({ error: `Kaltura auth: ${String(err)}` }, { status: 502 });
@@ -191,7 +151,7 @@ async function handler(req: NextRequest) {
       },
       pager: { pageSize: 500, pageIndex: 1, objectType: "KalturaFilterPager" },
     });
-    const objects = unwrapObjects(raw);
+    const objects = unwrapObjects<KalturaMediaEntry>(raw);
     for (const entry of objects) {
       const refId = (entry.referenceId ?? "").toLowerCase();
       if (!refId || !stillUnmatched.has(refId)) continue;
@@ -227,7 +187,7 @@ async function handler(req: NextRequest) {
         },
         pager: { pageSize: 5, pageIndex: 1, objectType: "KalturaFilterPager" },
       });
-      const objects = unwrapObjects(raw);
+      const objects = unwrapObjects<KalturaMediaEntry>(raw);
       for (const entry of objects) {
         const extracted = extractCatalogId(entry.description);
         if (extracted === recordId.toLowerCase() && entry.id) {

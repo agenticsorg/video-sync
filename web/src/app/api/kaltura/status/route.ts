@@ -37,7 +37,11 @@ async function handler(req: NextRequest) {
     return NextResponse.json({ error: "Kaltura credentials required" }, { status: 400 });
   }
 
-  // Mint a short-lived admin KS
+  // Mint a short-lived admin KS.
+  //
+  // disableentitlement: media.get on an entry inside an entitled
+  // category fails for a session without it, so a published video
+  // would report as missing rather than ready.
   const ksRes = await fetch(`${KALTURA_BASE}/?service=session&action=start&format=1`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -47,6 +51,7 @@ async function handler(req: NextRequest) {
       type: "2",
       expiry: "300",
       userId: "video-sync-status",
+      privileges: "disableentitlement",
     }),
   });
   if (!ksRes.ok) return NextResponse.json({ error: `KS mint failed (${ksRes.status})` }, { status: 502 });

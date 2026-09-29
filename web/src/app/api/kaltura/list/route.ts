@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
 import { getSharedCredential } from "../../../../lib/sharedCredentials";
+import { kalturaCall, mintAdminKs, resolveKalturaCredentials, DISABLE_ENTITLEMENT } from "../../../../lib/kalturaApi";
 import { kalturaWatchUrl } from "../../../../lib/urlResolver";
 
 // Dynamic — calls Kaltura API.
@@ -29,31 +30,6 @@ interface KalturaEntry {
   thumbnail_url: string | null;
   player_url: string;
   is_live: boolean;
-}
-
-async function kalturaCall(
-  service: string,
-  action: string,
-  params: Record<string, string | number | object>,
-): Promise<unknown> {
-  const body = new URLSearchParams();
-  body.set("format", "1");
-  for (const [k, v] of Object.entries(params)) {
-    if (typeof v === "object" && v !== null) {
-      for (const [kk, vv] of Object.entries(v as Record<string, unknown>)) {
-        body.set(`${k}:${kk}`, String(vv));
-      }
-    } else {
-      body.set(k, String(v));
-    }
-  }
-  const res = await fetch(`${KALTURA_BASE}/?service=${service}&action=${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!res.ok) throw new Error(`Kaltura ${service}.${action} ${res.status}: ${await res.text().catch(() => "")}`);
-  return res.json();
 }
 
 async function handler(req: NextRequest) {
@@ -75,23 +51,16 @@ async function handler(req: NextRequest) {
   }
   const rid = req.headers.get("x-request-id") ?? "n/a";
 
-  // 1. Mint admin KS
+  // 1. Mint admin KS.
+  //
+  // disableentitlement: without it an ADMIN session sees only the
+  // privacy contexts it is entitled to, so media.list silently omits
+  // every entry living in an entitled category and this import UI
+  // shows a partial view of the account. Same omission that hid 135
+  // of the partner's 163 categories.
   let ks: string;
   try {
-    const sessRes = await kalturaCall("session", "start", {
-      partnerId,
-      secret: adminSecret,
-      type: 2,
-      userId: "video-sync",
-      expiry: 3600,
-    });
-    if (typeof sessRes === "string") ks = sessRes;
-    else if (sessRes && typeof sessRes === "object" && "result" in sessRes) {
-      ks = String((sessRes as { result?: string }).result ?? "");
-    } else {
-      throw new Error(`session.start returned ${JSON.stringify(sessRes).slice(0, 200)}`);
-    }
-    if (!ks || ks.length < 10) throw new Error("session.start returned empty KS");
+    ks = await mintAdminKs({ partnerId, adminSecret }, { privileges: DISABLE_ENTITLEMENT });
   } catch (err) {
     serverLog("error", "ext:kaltura-session", "auth failed", { error: String(err), rid });
     return NextResponse.json({ error: `Kaltura auth: ${String(err)}` }, { status: 502 });

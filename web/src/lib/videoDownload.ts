@@ -157,6 +157,11 @@ export async function downloadKalturaToFile(
   sessForm.set("type", "2");
   sessForm.set("userId", "video-sync");
   sessForm.set("expiry", "3600");
+  // disableentitlement: the KS authorizes playManifest access to the
+  // entry, and an entry inside an entitled category is closed to a
+  // session that has not asked to bypass the check — so re-publishing
+  // from a Kaltura source would fail to fetch the media.
+  sessForm.set("privileges", "disableentitlement");
   const sessRes = await fetch("https://www.kaltura.com/api_v3/?service=session&action=start", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
