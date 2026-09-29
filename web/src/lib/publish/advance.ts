@@ -288,6 +288,15 @@ export async function advanceToPublished(
             { video_id: record.id },
           );
         }
+        // Same shape as visibility: the media is up, a declared
+        // property is not. Silence here is what let every Kaltura
+        // publish ship with no categories and nobody notice.
+        if (outcome.categories_applied === false) {
+          onEvent(
+            `PublishCategoriesNotApplied: "${record.title}"${dateTag(record.recorded_at)} — ${label} landed but its declared categories did not all apply: ${outcome.categories_error ?? "unknown reason"}`,
+            { video_id: record.id },
+          );
+        }
 
         if (outcome.spec.platform === "YouTube") {
           req.onYouTubePushed?.(id, attrs.privacy_status);

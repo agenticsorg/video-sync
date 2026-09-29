@@ -3641,6 +3641,19 @@ export default function VideoCard({ video, allVideos, broadcastPairs, onMutated,
                 }} title="This location is this record's own source">
                   (this record)
                 </span>
+              ) : loc.role === "Destination" ? (
+                // A Destination is somewhere we PUBLISHED to. There is
+                // never a catalog record keyed on a Kaltura entry id or
+                // a Drive file id, so "(not in catalog)" was always
+                // true and never informative — it read as a fault on a
+                // row that was working correctly. The role chip beside
+                // it already says what this row is.
+                //
+                // YouTube is the exception that made this look fine for
+                // so long: a published YouTube video usually DOES get
+                // ingested as its own row, so that branch resolves and
+                // this one never ran for it.
+                <span style={{ flex: 1, minWidth: 0 }} />
               ) : (
                 <span style={{
                   fontSize: "0.72rem", color: "var(--text-muted)", fontStyle: "italic",

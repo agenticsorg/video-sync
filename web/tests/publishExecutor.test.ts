@@ -253,24 +253,44 @@ describe("youtube adapter — SSE handling", () => {
 describe("kaltura adapter", () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  it("stamps the catalog id as referenceId and forwards category ids", async () => {
+  it("stamps the catalog id as referenceId and sends categories separately", async () => {
+    // This test used to assert `body.categoryIds === [12, 34]` from a
+    // spec declaring ["12", "34"]. It passed for months while every
+    // Kaltura publish shipped with no categories at all, because it
+    // picked the one input shape where the adapter's
+    // `.map(Number).filter(n => !isNaN(n))` loses nothing. The real
+    // registry holds NAMES, every one of which became NaN and was
+    // dropped — so the test documented a behaviour the production
+    // data never exercised.
+    //
+    // The declared values now go to /api/kaltura/categories verbatim,
+    // after the upload, where they can be resolved against the
+    // partner's category list.
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entryId: "k-1", playerUrl: "https://kal/1" }));
     vi.stubGlobal("fetch", fetchMock);
 
+    const declared = ["mediaspace_8DEe6>site>galleries>Weekly Recordings", "@zoomCategory@"];
     await kalturaAdapter.push({
       record,
-      spec: { platform: "Kaltura", visibility: "members", category_ids: ["12", "34"] },
+      spec: { platform: "Kaltura", visibility: "members", category_ids: declared },
       attrs: { title: "T", description: "D", tags: ["a"] },
       sourceUrl: "zoom://1", creds,
     });
 
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const [uploadUrl, uploadInit] = fetchMock.mock.calls[0];
+    expect(uploadUrl).toBe("/api/kaltura/upload");
+    const body = JSON.parse(uploadInit.body as string);
     expect(body.referenceId).toBe("rec-1");   // ADR-044
-    expect(body.categoryIds).toEqual([12, 34]);
+    expect(body).not.toHaveProperty("categoryIds");
     // The gap ADR-077 §5 closes: no access-control field is sent, so the
     // declared `members` never reaches the entry.
     expect(body).not.toHaveProperty("accessControlId");
     expect(body).not.toHaveProperty("visibility");
+
+    const [catUrl, catInit] = fetchMock.mock.calls[1];
+    expect(catUrl).toBe("/api/kaltura/categories");
+    const catBody = JSON.parse(catInit.body as string);
+    expect(catBody).toEqual({ entryId: "k-1", declared });
   });
 
   it("fails when the endpoint returns no entryId", async () => {

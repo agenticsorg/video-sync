@@ -88,6 +88,13 @@ export interface PushResult {
    *  applied. The media is there; the sharing is not what was asked for. */
   visibility_applied?: boolean;
   visibility_error?: string;
+  /** ADR-075 `category_ids` — false when the media landed but the
+   *  declared categories could not all be applied. Same contract as
+   *  visibility_applied: the push succeeded, a declared property did
+   *  not take, and the caller decides how loudly to say so. */
+  categories_applied?: boolean;
+  /** Operator-readable detail when categories_applied is false. */
+  categories_error?: string;
 }
 
 export interface DestinationAdapter {

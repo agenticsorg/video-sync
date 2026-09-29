@@ -50,6 +50,10 @@ export interface DestinationResult {
   /** False when the media landed but the declared visibility didn't take. */
   visibility_applied?: boolean;
   visibility_error?: string;
+  /** False when the media landed but the declared categories didn't
+   *  all apply. Same contract as visibility_applied. */
+  categories_applied?: boolean;
+  categories_error?: string;
   /** Why it was skipped, for the operator-facing summary. */
   skipReason?: string;
 }
@@ -125,6 +129,8 @@ export async function executePublish(
             observed_visibility: pushed.observed_visibility,
             visibility_applied: pushed.visibility_applied,
             visibility_error: pushed.visibility_error,
+            categories_applied: pushed.categories_applied,
+            categories_error: pushed.categories_error,
           };
         } catch (err) {
           // One destination failing must not abort its peers — that is
