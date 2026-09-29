@@ -79,11 +79,29 @@ export async function kalturaCall(
  * unwraps recursively rather than assuming one shape.
  */
 export function unwrapObjects<T = Record<string, unknown>>(v: unknown): T[] {
-  if (!v || typeof v !== "object") return [];
+  return unwrapList<T>(v).objects;
+}
+
+/**
+ * The same unwrap, keeping `totalCount`.
+ *
+ * Reading only `objects` is how a truncated listing passes for a
+ * complete one: a pager loop that stops when a page is shorter than
+ * requested cannot tell "that was everything" from "the server gave
+ * back less than it was asked for". `totalCount` is the server's own
+ * answer to that, so callers that page should compare against it.
+ */
+export function unwrapList<T = Record<string, unknown>>(
+  v: unknown,
+): { objects: T[]; totalCount: number | null } {
+  if (!v || typeof v !== "object") return { objects: [], totalCount: null };
   const o = v as Record<string, unknown>;
-  if (Array.isArray(o.objects)) return o.objects as T[];
-  if (o.result && typeof o.result === "object") return unwrapObjects<T>(o.result);
-  return [];
+  if (Array.isArray(o.objects)) {
+    const total = Number(o.totalCount);
+    return { objects: o.objects as T[], totalCount: Number.isFinite(total) ? total : null };
+  }
+  if (o.result && typeof o.result === "object") return unwrapList<T>(o.result);
+  return { objects: [], totalCount: null };
 }
 
 export interface KalturaCredentials {
@@ -114,10 +132,36 @@ export async function resolveKalturaCredentials(
   return { partnerId, adminSecret };
 }
 
-/** Mint an admin (type 2) Kaltura Session. */
+/**
+ * A KS privilege string that makes an admin session ignore category
+ * entitlements.
+ *
+ * Kaltura enforces entitlements per *privacy context*. Categories in a
+ * context with entitlements enabled — which is what MediaSpace/KMS
+ * sets up — are invisible to `category.list` and closed to
+ * `categoryEntry.add` unless the session asks to bypass the check,
+ * even for a type-2 ADMIN session. The omission does not raise: the
+ * listing simply comes back short, which reads exactly like "those
+ * categories do not exist".
+ *
+ * That is the shape of the bug this constant fixes. An admin KS listed
+ * 28 categories on partner 5896392 — the Zoom connector's
+ * `ep_private_*`/`ep_agenda_*` pairs and a few loose ones — while the
+ * four the operator uses by hand never appeared, and the tool reported
+ * them as not_found with total confidence.
+ */
+export const DISABLE_ENTITLEMENT = "disableentitlement";
+
+/**
+ * Mint an admin (type 2) Kaltura Session.
+ *
+ * `privileges` is passed through to session.start. Pass
+ * DISABLE_ENTITLEMENT for admin operations that must see the whole
+ * category tree rather than one privacy context's slice.
+ */
 export async function mintAdminKs(
   creds: KalturaCredentials,
-  { expiry = 3600 }: { expiry?: number } = {},
+  { expiry = 3600, privileges }: { expiry?: number; privileges?: string } = {},
 ): Promise<string> {
   const res = await kalturaCall("session", "start", {
     partnerId: creds.partnerId,
@@ -125,6 +169,7 @@ export async function mintAdminKs(
     type: 2, // ADMIN
     userId: "video-sync",
     expiry,
+    ...(privileges ? { privileges } : {}),
   });
   const ks =
     typeof res === "string"

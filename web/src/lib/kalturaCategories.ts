@@ -274,6 +274,10 @@ export interface ReconcileResponse {
    *  diagnosis; any other number makes an unresolved name a real
    *  registry problem rather than a permissions one. */
   categoriesListed?: number;
+  /** What Kaltura said the total was. A gap between this and
+   *  `categoriesListed` means the listing was read short — the one
+   *  case where a `not_found` proves nothing at all. */
+  categoriesReportedByKaltura?: number | null;
   /** A sample of what the partner actually has, sent only when
    *  something failed to resolve. Turns "then what is it called?" into
    *  a question the operator can answer from the same screen. */
@@ -320,7 +324,14 @@ export function summarizeReconcile(res: ReconcileResponse): string {
         .join(", ")}`,
     );
     if (typeof res.categoriesListed === "number") {
-      parts.push(`checked against ${res.categoriesListed} categories on the partner`);
+      const total = res.categoriesReportedByKaltura;
+      // Say so loudly when the listing was short: a not_found checked
+      // against a partial catalog is not evidence of anything.
+      parts.push(
+        typeof total === "number" && total > res.categoriesListed
+          ? `checked against only ${res.categoriesListed} of ${total} categories Kaltura reports — the listing was read short, so these misses prove nothing`
+          : `checked against ${res.categoriesListed} categories on the partner`,
+      );
     }
   }
   if (templates.length) {
@@ -362,6 +373,7 @@ export async function reconcileKalturaCategories(
     unresolved: data.unresolved ?? [],
     failed: data.failed ?? [],
     categoriesListed: data.categoriesListed,
+    categoriesReportedByKaltura: data.categoriesReportedByKaltura,
     availableSample: data.availableSample,
     currentCategoryIds: data.currentCategoryIds,
   };

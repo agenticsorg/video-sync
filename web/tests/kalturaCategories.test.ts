@@ -332,6 +332,21 @@ describe("summarizeReconcile / isCompliant", () => {
     expect(isCompliant(res)).toBe(false);
   });
 
+  it("refuses to stand behind a not_found when the listing was read short", () => {
+    // Partner 5896392 returned 28 categories while the operator was
+    // using four others by hand. A miss checked against a partial
+    // catalog is not evidence, and saying "checked against 28" implied
+    // a completeness the call never established.
+    const text = summarizeReconcile({
+      ...base,
+      categoriesListed: 28,
+      categoriesReportedByKaltura: 312,
+      unresolved: [{ raw: "vod_sources", id: null, fullName: null, reason: "not_found" as const }],
+    });
+    expect(text).toContain("only 28 of 312");
+    expect(text).toContain("prove nothing");
+  });
+
   it("says how many categories it checked against, so not_found is falsifiable", () => {
     const text = summarizeReconcile({
       ...base,

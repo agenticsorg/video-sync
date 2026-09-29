@@ -20,7 +20,14 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
-import { kalturaCall, unwrapObjects, mintAdminKs, resolveKalturaCredentials } from "../../../../lib/kalturaApi";
+import {
+  kalturaCall,
+  unwrapObjects,
+  unwrapList,
+  mintAdminKs,
+  resolveKalturaCredentials,
+  DISABLE_ENTITLEMENT,
+} from "../../../../lib/kalturaApi";
 import {
   planReconcile,
   type KalturaCategory,
@@ -55,29 +62,46 @@ const SAMPLE_SIZE = 200;
  * detect an ambiguous name (two categories sharing a leaf name) rather
  * than taking whichever one Kaltura returns first.
  */
-async function listAllCategories(ks: string): Promise<{ categories: KalturaCategory[]; truncated: boolean }> {
+async function listAllCategories(
+  ks: string,
+): Promise<{ categories: KalturaCategory[]; truncated: boolean; totalCount: number | null }> {
   const categories: KalturaCategory[] = [];
+  let totalCount: number | null = null;
+
   for (let page = 1; page <= MAX_CATEGORY_PAGES; page++) {
     const res = await kalturaCall("category", "list", {
       ks,
       // An explicit filter objectType, matching every other Kaltura
       // call in this repo (media.list passes KalturaMediaEntryFilter).
-      // The first version omitted the filter entirely and the listing
-      // came back with nothing to match against; Kaltura is not
-      // consistent about defaulting it.
       filter: { objectType: "KalturaCategoryFilter" },
       pager: { pageSize: CATEGORY_PAGE_SIZE, pageIndex: page, objectType: "KalturaFilterPager" },
     });
-    const objects = unwrapObjects<{ id?: number | string; name?: string; fullName?: string }>(res);
+    const { objects, totalCount: reported } = unwrapList<{
+      id?: number | string;
+      name?: string;
+      fullName?: string;
+    }>(res);
+    if (reported !== null) totalCount = reported;
+
     for (const o of objects) {
       const id = Number(o.id);
       if (!Number.isFinite(id)) continue;
       const name = String(o.name ?? "");
       categories.push({ id, name, fullName: String(o.fullName ?? name) });
     }
-    if (objects.length < CATEGORY_PAGE_SIZE) return { categories, truncated: false };
+
+    // Stop on the server's own count, not on a short page. A page
+    // shorter than requested means "the server returned less than it
+    // was asked for", which is NOT the same as "that was everything" —
+    // conflating the two is how a partial listing passed for complete
+    // and turned four real categories into four confident not_founds.
+    if (objects.length === 0) break;
+    if (totalCount !== null && categories.length >= totalCount) break;
+    if (totalCount === null && objects.length < CATEGORY_PAGE_SIZE) break;
   }
-  return { categories, truncated: true };
+
+  const truncated = totalCount !== null && categories.length < totalCount;
+  return { categories, truncated, totalCount };
 }
 
 /** Category ids the entry already belongs to. */
@@ -126,8 +150,11 @@ async function handler(req: NextRequest): Promise<NextResponse> {
   serverLog("info", "ext:kaltura-categories", "starting", { rid, entryId, declaredCount: declared.length });
 
   try {
-    const ks = await mintAdminKs(creds);
-    const [{ categories, truncated }, currentIds] = await Promise.all([
+    // disableentitlement: without it an ADMIN KS sees only the privacy
+    // contexts it is entitled to, and the rest of the category tree is
+    // silently absent rather than refused. See DISABLE_ENTITLEMENT.
+    const ks = await mintAdminKs(creds, { privileges: DISABLE_ENTITLEMENT });
+    const [{ categories, truncated, totalCount }, currentIds] = await Promise.all([
       listAllCategories(ks),
       currentMembership(ks, entryId),
     ]);
@@ -136,7 +163,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       // categories as "not_found" and invite someone to create a
       // duplicate. Refuse instead.
       return NextResponse.json(
-        { error: `Partner has more than ${CATEGORY_PAGE_SIZE * MAX_CATEGORY_PAGES} categories; name resolution needs a targeted lookup` },
+        { error: `Read ${categories.length} of ${totalCount} categories; name resolution needs the full listing` },
         { status: 501 },
       );
     }
@@ -175,6 +202,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       unresolved: plan.unresolved,
       failed,
       categoriesListed: categories.length,
+      categoriesReportedByKaltura: totalCount,
       currentCategoryIds: currentIds,
       ...(anythingUnresolved
         ? { availableSample: categories.slice(0, SAMPLE_SIZE).map(c => c.fullName) }
@@ -192,6 +220,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       // registry fault, and the membership says whether categories are
       // reaching this entry by some other route (the Zoom connector).
       categoriesListed: categories.length,
+      categoriesReportedByKaltura: totalCount,
       currentCategoryIds: currentIds,
       sample: categories.slice(0, SAMPLE_SIZE).map(c => c.fullName),
     });
