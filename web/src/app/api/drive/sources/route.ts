@@ -28,10 +28,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { join } from "path";
-import { GoogleAuth } from "google-auth-library";
 import { withRequestLogging, serverLog } from "../../../../lib/serverLogger";
 import { getActor } from "../../../../lib/auth";
 import type { DriveSourceFolder } from "../../../../lib/driveSources";
+import { driveReadonlyToken, serviceAccountEmail } from "../../../../lib/driveSourcesServer";
 
 export const dynamic = "force-dynamic";
 
@@ -57,33 +57,6 @@ async function read(): Promise<Store> {
 async function write(store: Store): Promise<void> {
   await fs.mkdir(join(process.cwd(), "data"), { recursive: true });
   await fs.writeFile(FILE(), JSON.stringify(store, null, 2), "utf-8");
-}
-
-/** Mint a drive.readonly access token from the runtime service account.
- *  NOT lib/drive.ts's client — that one holds `drive.file`, which only
- *  reaches files the app itself created and so can never see an
- *  operator's folder (ADR-078 §6). */
-export async function driveReadonlyToken(): Promise<string | null> {
-  try {
-    const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
-    const client = await auth.getClient();
-    const resp = await client.getAccessToken();
-    return resp.token ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** The runtime SA's own address, for the "share the folder with…" hint.
- *  Best-effort: a local dev box on user ADC has no client_email. */
-async function serviceAccountEmail(): Promise<string | null> {
-  try {
-    const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/drive.readonly"] });
-    const creds = await auth.getCredentials();
-    return creds.client_email ?? null;
-  } catch {
-    return null;
-  }
 }
 
 type ProbeResult =

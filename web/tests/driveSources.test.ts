@@ -15,9 +15,9 @@ import {
   collectDriveFacts,
   classifyDriveFile,
   DRIVE_LIST_MAX_FILES,
+  buildQuery,
   type DriveSourceFile,
 } from "../src/lib/driveSources";
-import { buildQuery } from "../src/app/api/drive/sources/list/route";
 
 const FILE_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz01234567";
 

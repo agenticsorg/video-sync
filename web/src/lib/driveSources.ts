@@ -243,3 +243,23 @@ export function classifyDriveFile(
     ...(duplicateOf ? { duplicate_of: duplicateOf } : {}),
   };
 }
+
+/**
+ * Build the Drive query. `mimeType contains 'video/'` does at the query
+ * layer what ADR-071 §1's per-file guard does — Docs, images and PDFs
+ * never enter the result set, so the operator never sees a row that
+ * would fail on import.
+ */
+export function buildQuery(folderId: string, from?: string, to?: string): string {
+  const clauses = [
+    `'${folderId.replace(/'/g, "\\'")}' in parents`,
+    `mimeType contains 'video/'`,
+    `trashed = false`,
+  ];
+  // Drive wants an RFC-3339 instant. A bare YYYY-MM-DD `to` must cover
+  // the whole day, so it becomes the end of that day rather than
+  // midnight — otherwise "to: today" silently excludes today.
+  if (from) clauses.push(`createdTime >= '${from}T00:00:00'`);
+  if (to) clauses.push(`createdTime <= '${to}T23:59:59'`);
+  return clauses.join(" and ");
+}

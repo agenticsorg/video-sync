@@ -31,7 +31,7 @@ import { withRequestLogging, serverLog } from "../../../../../lib/serverLogger";
 import { getActor } from "../../../../../lib/auth";
 import { readCatalog } from "../../../../../lib/catalogStore";
 import type { VideoRecordJSON } from "../../../../../lib/wasm";
-import { driveReadonlyToken } from "../route";
+import { driveReadonlyToken } from "../../../../../lib/driveSourcesServer";
 import {
   DRIVE_LIST_MAX_FILES,
   DRIVE_LIST_PAGE_SIZE,
@@ -39,6 +39,7 @@ import {
   collectDriveFacts,
   type DriveSourceFile,
   type DriveSourceFolder,
+  buildQuery,
 } from "../../../../../lib/driveSources";
 
 export const dynamic = "force-dynamic";
@@ -73,26 +74,6 @@ async function registeredFolders(): Promise<DriveSourceFolder[]> {
   } catch {
     return [];
   }
-}
-
-/**
- * Build the Drive query. `mimeType contains 'video/'` does at the query
- * layer what ADR-071 §1's per-file guard does — Docs, images and PDFs
- * never enter the result set, so the operator never sees a row that
- * would fail on import.
- */
-export function buildQuery(folderId: string, from?: string, to?: string): string {
-  const clauses = [
-    `'${folderId.replace(/'/g, "\\'")}' in parents`,
-    `mimeType contains 'video/'`,
-    `trashed = false`,
-  ];
-  // Drive wants an RFC-3339 instant. A bare YYYY-MM-DD `to` must cover
-  // the whole day, so it becomes the end of that day rather than
-  // midnight — otherwise "to: today" silently excludes today.
-  if (from) clauses.push(`createdTime >= '${from}T00:00:00'`);
-  if (to) clauses.push(`createdTime <= '${to}T23:59:59'`);
-  return clauses.join(" and ");
 }
 
 function normalise(f: DriveApiFile): Omit<DriveSourceFile, "already_indexed"> {
