@@ -30,6 +30,17 @@ interface KalturaEntry {
   thumbnail_url: string | null;
   player_url: string;
   is_live: boolean;
+  /** Kaltura's own reference id. For an entry the Zoom connector
+   *  ingested this carries the Zoom meeting UUID and the true
+   *  recording start — see lib/kalturaZoomOrigin. Previously received
+   *  from media.list and discarded, which is why every Kaltura-origin
+   *  record in the catalog has no upstream link. */
+  reference_id: string | null;
+  /** Connector markers. The Zoom integration tags what it creates. */
+  admin_tags: string | null;
+  /** Category membership, as ids. Tells us what the connector already
+   *  filed the entry under before any backfill touches it. */
+  category_ids: string[];
 }
 
 async function handler(req: NextRequest) {
@@ -118,6 +129,9 @@ async function handler(req: NextRequest) {
       thumbnail_url: e.thumbnailUrl != null ? String(e.thumbnailUrl) : null,
       player_url: playerUrl,
       is_live: Number(e.mediaType) === 7 || Number(e.mediaType) === 201,
+      reference_id: e.referenceId != null ? String(e.referenceId) : null,
+      admin_tags: e.adminTags != null ? String(e.adminTags) : null,
+      category_ids: String(e.categoriesIds ?? "").split(",").map(x => x.trim()).filter(Boolean),
     };
   });
 

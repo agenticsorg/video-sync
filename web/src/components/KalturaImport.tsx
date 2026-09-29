@@ -8,10 +8,14 @@ import { saveSourceCheck } from "../lib/importStateClient";
 import { resolveTitleFromRegistry } from "../lib/youtubeTitleAlign";
 import { getSeriesRegistry } from "../lib/seriesRegistryClient";
 import type { SeriesRegistryEntry } from "../lib/youtubeTitleAlign";
+import { parseZoomReferenceId, classifyReferenceId } from "../lib/kalturaZoomOrigin";
 import HelpTip from "./HelpTip";
 
 const CONNECTIONS_KEY = "video-sync:connections";
 
+/** Mirrors the shape /api/kaltura/list returns. A second declaration
+ *  of the same contract is how reference_id went unnoticed on one side
+ *  of it, so the route's fields are kept in step here. */
 interface KalturaEntry {
   id: string;
   name: string;
@@ -22,6 +26,9 @@ interface KalturaEntry {
   thumbnail_url: string | null;
   player_url: string;
   is_live: boolean;
+  reference_id: string | null;
+  admin_tags: string | null;
+  category_ids: string[];
 }
 
 interface Props {
@@ -154,6 +161,10 @@ export default function KalturaImport({ onImported, onEvent, dateFrom: dateFromP
       if (!selected.has(e.id)) continue;
       if (isExcluded("Kaltura", e.id) || existing.has(`Kaltura:${e.id}`)) { skipped++; continue; }
 
+      // The connector's reference id carries the Zoom meeting UUID and
+      // the real recording start. Identity, not a fuzzy match.
+      const zoomOrigin = parseZoomReferenceId(e.reference_id);
+
       // ADR-055/056 — apply title alignment at ingest.
       const align = resolveTitleFromRegistry(e.name, e.createdAt, seriesRegistry);
       const finalTitle = align?.new_title ?? e.name;
@@ -172,9 +183,30 @@ export default function KalturaImport({ onImported, onEvent, dateFrom: dateFromP
         download_url: `kaltura://entry/${e.id}`,
         thumbnail_url: e.thumbnail_url ?? undefined,
         tags: e.tags.length > 0 ? e.tags : ["kaltura-import"],
-        recorded_at: e.createdAt,
+        // Kaltura's createdAt is when KALTURA ingested the entry, not
+        // when the meeting happened — 1_b8kw2g8u was created at
+        // 18:13:49Z for a recording that started at 15:45:02Z. When
+        // the connector's reference id tells us the true start, use
+        // it: ADR-048 date gates, ADR-060 show windows and the
+        // Overview all read this field.
+        recorded_at: zoomOrigin?.recorded_at ?? e.createdAt,
       };
       const meta: Record<string, unknown> = { player_url: e.player_url };
+      // Provenance the importer used to discard. Without it a
+      // Kaltura-origin record cannot be matched to the Zoom recording
+      // it came from, and ADR-044's presence sweep cannot tell an
+      // entry the connector created from one that is genuinely absent.
+      if (e.reference_id) {
+        meta.kaltura_reference_id = e.reference_id;
+        meta.kaltura_reference_kind = classifyReferenceId(e.reference_id);
+      }
+      if (e.admin_tags) meta.kaltura_admin_tags = e.admin_tags;
+      if (e.category_ids.length > 0) meta.kaltura_category_ids = e.category_ids.join(",");
+      if (zoomOrigin) {
+        meta.zoom_meeting_uuid = zoomOrigin.meeting_uuid;
+        meta.zoom_recorded_at = zoomOrigin.recorded_at;
+        meta.kaltura_ingested_at = e.createdAt;
+      }
       if (e.is_live) meta.live = "1";
       if (align) {
         meta.kaltura_original_title = e.name;
