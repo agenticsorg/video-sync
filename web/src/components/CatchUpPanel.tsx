@@ -29,6 +29,7 @@ import type { SeriesRegistryEntry } from "../lib/youtubeTitleAlign";
 import { findOrphanClips, runOrphanClipsRepair, type OrphanRepairProgressEvent } from "../lib/orphanClipsRepair";
 import {
   findRecordsNeedingOriginBackfill,
+  findRecordsMissingZoomOriginLink,
   findOriginMergePairs,
   runKalturaOriginBackfill,
   runKalturaOriginMerge,
@@ -542,7 +543,15 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
   const [originMergeProgress, setOriginMergeProgress] = useState<{ index: number; total: number } | null>(null);
   const [originMergeSummary, setOriginMergeSummary] =
     useState<{ merged: number; location_only: number; already: number; errors: number } | null>(null);
-  const originBackfillCount = useMemo(() => findRecordsNeedingOriginBackfill(videos).length, [videos]);
+  // Two kinds of work, one button. Records with no reference id need
+  // a Kaltura read; records that already know their Zoom origin but
+  // have no upstream link to show for it need nothing but a local
+  // write. Counting only the first left the button disabled for
+  // exactly the records the first run had half-finished.
+  const originBackfillCount = useMemo(
+    () => findRecordsNeedingOriginBackfill(videos).length + findRecordsMissingZoomOriginLink(videos).length,
+    [videos],
+  );
   const originMergeCount = useMemo(() => findOriginMergePairs(videos).length, [videos]);
 
   async function runOriginBackfill() {

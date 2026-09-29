@@ -126,6 +126,106 @@ export function originPatch(facts: OriginFacts): {
   return { metadata_extra: patch, recorded_at: origin.recorded_at, origin };
 }
 
+// ── Linking: make the recovered origin visible ──────────────────────
+
+/**
+ * The upstream link a recovered Zoom origin implies.
+ *
+ * Recording the meeting UUID in `metadata_extra` is not enough: the
+ * card and the Provenance graph read `upstream_links`, so a record
+ * that demonstrably knows where it came from still displayed nothing.
+ * That is what the operator saw on 06dbb971 — reference id recovered,
+ * `recorded_at` corrected, and no visible Zoom origin anywhere.
+ *
+ * `video_id: null` is a PHANTOM link: we know the meeting, we do not
+ * hold a catalog record for it. provenanceLinker already uses this
+ * shape for Fireflies transcripts whose Zoom meeting is not indexed,
+ * and it is the common case here — every one of the 11 Kaltura-origin
+ * records names a meeting the catalog does not hold, because the
+ * Kaltura entries outlive Zoom's retention window.
+ *
+ * `SameEvent` follows provenanceLinker's own choice for this shape.
+ * It renders as "Same session", which is honest: the Kaltura entry is
+ * a copy of that meeting's recording. None of the other relations
+ * (TranscribedFrom, ScreenRecordingOf, ClipOf, BroadcastedFrom)
+ * describes "another platform ingested it".
+ */
+export function zoomOriginLinkCmd(
+  origin: { meeting_uuid: string },
+  zoomRecordId: string | null,
+): { video_id: string | null; platform: string; external_id: string; relation: string; linked_by: string } {
+  return {
+    video_id: zoomRecordId,
+    platform: "Zoom",
+    external_id: origin.meeting_uuid,
+    relation: "SameEvent",
+    linked_by: "Auto",
+  };
+}
+
+/**
+ * Records that know their Zoom origin but do not show it.
+ *
+ * Pure, and the answer is entirely in the catalog — no Kaltura call.
+ * This exists because the first version of the backfill wrote the
+ * meeting UUID into `metadata_extra` and stopped there, so eleven
+ * records were left knowing their origin and displaying nothing. A
+ * re-run must repair them without re-reading Kaltura for data it
+ * already has.
+ */
+export function findRecordsMissingZoomOriginLink(
+  allRecords: readonly VideoRecordJSON[],
+): { record_id: string; title: string; meeting_uuid: string }[] {
+  const out: { record_id: string; title: string; meeting_uuid: string }[] = [];
+  for (const r of allRecords) {
+    const uuid = meta(r).zoom_meeting_uuid;
+    if (!uuid) continue;
+    if (hasZoomOriginLink(r, uuid)) continue;
+    out.push({ record_id: r.id, title: r.title, meeting_uuid: uuid });
+  }
+  return out;
+}
+
+/** Is this Zoom origin already recorded as an upstream link? */
+export function hasZoomOriginLink(r: VideoRecordJSON, meetingUuid: string): boolean {
+  return (r.upstream_links ?? []).some(
+    l => l.platform === "Zoom" && l.external_id === meetingUuid,
+  );
+}
+
+/**
+ * Write the upstream link, resolving to a catalog record when we hold
+ * the Zoom recording and leaving a phantom when we do not.
+ *
+ * Returns whether a link was written. Never throws: the provenance in
+ * `metadata_extra` has already landed by the time this runs, and a
+ * failed link must not discard it.
+ */
+export function ensureZoomOriginLink(
+  recordId: string,
+  meetingUuid: string,
+  actorState: ActorState,
+  log?: (msg: string, ctx?: Record<string, unknown>) => void,
+): { linked: boolean; phantom: boolean } {
+  const all = videoStore.getAll();
+  const current = all.find(x => x.id === recordId);
+  if (!current || hasZoomOriginLink(current, meetingUuid)) return { linked: false, phantom: false };
+
+  const zoomRec = all.find(x => x.source_platform === "Zoom" && x.source_id === `zoom-${meetingUuid}`);
+  try {
+    videoStore.mutate(recordId, (r) =>
+      r.link_upstream(actorCommand(actorState, zoomOriginLinkCmd({ meeting_uuid: meetingUuid }, zoomRec?.id ?? null))),
+    );
+    return { linked: true, phantom: !zoomRec };
+  } catch (err) {
+    log?.(
+      `Origin link failed for ${recordId.slice(0, 8)} -> Zoom ${meetingUuid}: ${err instanceof Error ? err.message : String(err)}`,
+      { video_id: recordId },
+    );
+    return { linked: false, phantom: !zoomRec };
+  }
+}
+
 // ── Merge: one record per event ─────────────────────────────────────
 
 export interface OriginMergePair {
@@ -308,11 +408,31 @@ export async function runKalturaOriginBackfill(
   onEvent: (ev: OriginBackfillProgressEvent) => void,
   log?: (msg: string, ctx?: Record<string, unknown>) => void,
 ): Promise<{ zoom_origin: number; recorded: number; not_found: number; errors: number }> {
+  // Pass 1, local and free: records that already know their Zoom
+  // origin but have no upstream link to show for it. The first
+  // version of this backfill wrote the meeting UUID into
+  // metadata_extra and stopped, so a re-run must repair those without
+  // re-reading Kaltura for data it already holds.
+  const unlinked = findRecordsMissingZoomOriginLink(videoStore.getAll());
+  let relinked = 0;
+  for (const u of unlinked) {
+    const { linked, phantom } = ensureZoomOriginLink(u.record_id, u.meeting_uuid, actorState, log);
+    if (!linked) continue;
+    relinked++;
+    log?.(
+      `Origin link — ${u.record_id.slice(0, 8)} -> Zoom ${u.meeting_uuid}` +
+      `${phantom ? " (not in catalog — phantom link)" : " (linked to its catalog record)"}`,
+      { video_id: u.record_id },
+    );
+  }
+  if (relinked > 0) log?.(`Kaltura origin backfill — restored ${relinked} missing upstream link${relinked === 1 ? "" : "s"} from data already held`);
+
+  // Pass 2: records with no reference id at all, which needs Kaltura.
   const work = findRecordsNeedingOriginBackfill(videoStore.getAll());
   onEvent({ type: "started", total: work.length });
   log?.(`Kaltura origin backfill started — ${work.length} record${work.length === 1 ? "" : "s"} missing a reference id`);
 
-  const totals = { zoom_origin: 0, recorded: 0, not_found: 0, errors: 0 };
+  const totals = { zoom_origin: relinked, recorded: 0, not_found: 0, errors: 0 };
   if (work.length === 0) {
     onEvent({ type: "complete", total: 0, totals });
     return totals;
@@ -369,14 +489,19 @@ export async function runKalturaOriginBackfill(
       if (patch.recorded_at) edits.recorded_at = patch.recorded_at;
       videoStore.mutate(w.record_id, (r) => r.update_metadata(actorCommand(actorState, { edits })));
 
-      if (patch.origin) {
+      const origin = patch.origin;
+      if (origin) {
+        // Make it visible. metadata_extra alone is invisible to the
+        // card and the Provenance graph.
+        const { phantom } = ensureZoomOriginLink(w.record_id, origin.meeting_uuid, actorState, log);
         totals.zoom_origin++;
-        const before = (videoStore.getAll().find(x => x.id === w.record_id)?.recorded_at) ?? "";
         log?.(
-          `Origin backfill — ${w.entry_id} came from Zoom meeting ${patch.origin.meeting_uuid}; recorded_at set to ${patch.origin.recorded_at} (was Kaltura's ingest time ${facts.created_at})`,
+          `Origin backfill — ${w.entry_id} came from Zoom meeting ${origin.meeting_uuid}` +
+          `${phantom ? " (not in catalog — phantom link)" : " (linked to its catalog record)"}` +
+          `; recorded_at set to ${origin.recorded_at} (was Kaltura's ingest time ${facts.created_at})`,
           { video_id: w.record_id },
         );
-        emit({ kind: "zoom_origin", uuid: patch.origin.meeting_uuid, correctedDate: before !== facts.created_at });
+        emit({ kind: "zoom_origin", uuid: origin.meeting_uuid, correctedDate: patch.recorded_at !== facts.created_at });
       } else {
         totals.recorded++;
         const kind = String(patch.metadata_extra.kaltura_reference_kind ?? "absent");

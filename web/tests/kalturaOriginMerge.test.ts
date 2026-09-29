@@ -20,6 +20,9 @@ import {
   findOriginMergePairs,
   originPatch,
   kalturaOriginEntryId,
+  findRecordsMissingZoomOriginLink,
+  hasZoomOriginLink,
+  zoomOriginLinkCmd,
   MERGEABLE,
 } from "../src/lib/kalturaOriginMerge";
 import type { VideoRecordJSON } from "../src/lib/wasm";
@@ -159,5 +162,72 @@ describe("MERGEABLE", () => {
     for (const s of ["Discovered", "Indexed", "InScope", "OutOfScope", "Rejected"]) {
       expect(MERGEABLE.has(s)).toBe(true);
     }
+  });
+});
+
+/**
+ * The gap the operator found: record 06dbb971 had its reference id
+ * recovered and `recorded_at` corrected, and still showed no Zoom
+ * origin anywhere. The meeting UUID went into `metadata_extra`, which
+ * neither the card nor the Provenance graph reads — both read
+ * `upstream_links`, and nothing wrote one.
+ */
+describe("making a recovered origin visible", () => {
+  const withOrigin = (over: Partial<VideoRecordJSON> & { metadata_extra?: Record<string, unknown> } = {}) => rec({
+    id: "kal", locations: [kalturaLoc()],
+    metadata_extra: { zoom_meeting_uuid: UUID, kaltura_reference_id: REF },
+    ...over,
+  });
+
+  it("selects a record that knows its origin but shows no link", () => {
+    const work = findRecordsMissingZoomOriginLink([withOrigin()]);
+    expect(work).toEqual([{ record_id: "kal", title: "T", meeting_uuid: UUID }]);
+  });
+
+  it("needs no Kaltura call — the reference id is already recorded", () => {
+    // findRecordsNeedingOriginBackfill would skip it, which is why the
+    // button sat disabled for exactly the records the first run had
+    // half-finished.
+    expect(findRecordsNeedingOriginBackfill([withOrigin()])).toEqual([]);
+    expect(findRecordsMissingZoomOriginLink([withOrigin()])).toHaveLength(1);
+  });
+
+  it("does not re-link a record that already has the link", () => {
+    const linked = withOrigin({
+      upstream_links: [{
+        video_id: null, platform: "Zoom", external_id: UUID,
+        account_hint: null, relation: "SameEvent", linked_by: "Auto",
+        linked_at: "2026-09-29T00:00:00Z",
+      }],
+    });
+    expect(hasZoomOriginLink(linked, UUID)).toBe(true);
+    expect(findRecordsMissingZoomOriginLink([linked])).toEqual([]);
+  });
+
+  it("ignores records with no recovered origin", () => {
+    expect(findRecordsMissingZoomOriginLink([rec({ id: "x", locations: [kalturaLoc()] })])).toEqual([]);
+  });
+});
+
+describe("zoomOriginLinkCmd", () => {
+  it("is a phantom link when we do not hold the Zoom recording", () => {
+    // The common case: all 11 Kaltura-origin records name a meeting
+    // the catalog does not hold, because the Kaltura entries outlive
+    // Zoom's retention window.
+    expect(zoomOriginLinkCmd({ meeting_uuid: UUID }, null)).toEqual({
+      video_id: null, platform: "Zoom", external_id: UUID,
+      relation: "SameEvent", linked_by: "Auto",
+    });
+  });
+
+  it("resolves to the catalog record when we do hold it", () => {
+    expect(zoomOriginLinkCmd({ meeting_uuid: UUID }, "zoomrec").video_id).toBe("zoomrec");
+  });
+
+  it("uses the relation provenanceLinker already uses for this shape", () => {
+    // Renders as "Same session". None of TranscribedFrom /
+    // ScreenRecordingOf / ClipOf / BroadcastedFrom describes "another
+    // platform ingested this recording".
+    expect(zoomOriginLinkCmd({ meeting_uuid: UUID }, null).relation).toBe("SameEvent");
   });
 });
