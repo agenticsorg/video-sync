@@ -216,3 +216,65 @@ Mirror the YouTube pattern from ADR-012/ADR-016:
 - **ADR-016**: Retrospective Backfill Uploader — Recover flow generalises to any destination
 - **ADR-024**: Post-processing Webhook and Email — fires on either destination's success/failure
 - **ADR-036**: Google Workspace Authentication — Phase 2 of that ADR moves Kaltura admin secret to Secret Manager
+
+---
+
+## Addendum: Every Kaltura Session Needs `disableentitlement` (2026-09-29)
+
+**Addendum to**: the session-minting described in §Decision, and every Kaltura call built on it since.
+
+Every Kaltura session this app has ever minted was a type-2 ADMIN session with no `privileges`. That is not sufficient, and the insufficiency is silent.
+
+Kaltura enforces **entitlements per privacy context**. A MediaSpace/KMS root establishes one, and an ADMIN session is *not* exempt from it. Content inside an entitled context is absent from listings and closed to writes — with no error, no warning, and a `200 OK`. A short answer and a complete answer are indistinguishable.
+
+### How it surfaced
+
+Partner 5896392 has 163 categories. An admin session without the privilege listed **28**: the Zoom connector's `ep_private_*` / `ep_agenda_*` pairs and a few loose ones — everything *outside* any entitled context. The org's actual categories, under `mediaspace_8DEe6>…` and the per-event `<id>EP<hash>>…` roots, were all invisible.
+
+The category-reconcile tool therefore reported four categories the operator uses by hand as `not_found`, and said so with total confidence. The diagnosis was checked against a catalog that was itself a sixth of the truth. The operator's reply — *"the categories do exist in Kaltura as I've used them manually"* — was the only reason it was caught.
+
+`categoryEntry.list` was filtered the same way: entry `1_yhs8i4rb` reported membership of **no** categories while actually belonging to `@zoomCategory@`.
+
+### What else was affected
+
+The bug was never about categories. Every Kaltura call in the app was narrowed the same way:
+
+| Site | Silent consequence |
+|---|---|
+| `api/kaltura/presence-batch` | an entry it cannot see reports **"absent"** — inviting a re-publish of a video that is already live |
+| `api/kaltura/list` | the import UI showed a partial view of the account |
+| `api/kaltura/status` | `media.get` fails, so a published video reads as missing |
+| `api/kaltura/captions` | caption assets hang off the entry, so a record looks as though it has none |
+| `api/kaltura/upload` | `media.add` cannot attach the entry to an entitled category |
+| `lib/sourceDownload`, `lib/videoDownload` | the KS authorizes `playManifest`, so re-publishing *from* a Kaltura source could not fetch the media |
+
+The presence sweep is the worst of these. ADR-044 exists to stop operators re-publishing videos that are already on Kaltura, and this omission made it capable of recommending exactly that.
+
+### Decision
+
+**Every Kaltura session mints with `privileges=disableentitlement`.** It is exported as `DISABLE_ENTITLEMENT` from `web/src/lib/kalturaApi.ts` and passed by all eight mint sites.
+
+This is a server-side admin integration operating on the org's own account, so bypassing per-user entitlement is the correct posture rather than a workaround: the app is not acting for an end user whose entitlements should constrain it. The alternative — granting the `video-sync` user entitlement to each context — would need a KMC change per new context and would fail the same silent way whenever one was missed.
+
+`web/src/lib/kalturaApi.ts` is now the single Kaltura client. `list`, `presence-batch` and `upload` each carried their own `kalturaCall`, and the three had already drifted: only `upload`'s raised on a `KalturaAPIException`, so the other two returned the exception object as if it were a result.
+
+### Guard
+
+`web/tests/kalturaEntitlements.test.ts` walks the source for session-mint sites and fails if one lacks the privilege. The risk is a *new* mint site added later, which no behavioural test would cover.
+
+Its first version was worthless: it substring-matched `"disableentitlement"` against raw file text, and every one of those files carries a comment *explaining* the privilege — so it matched the prose. A real privilege was deleted and the test stayed green. It now strips comments first, verified by deleting one and watching it fail. A guard that cannot fail is worse than no guard, because it also asserts the thing is covered.
+
+### The pattern worth naming
+
+Four bugs in this one feature shared a shape — **a silent narrowing reported as a definitive result**:
+
+1. `category_ids.map(Number).filter(n => !isNaN(n))` dropped every declared name, because the registry holds names; the array emptied and the upload route skipped the field.
+2. `category.list` was sent with no `filter` objectType, against a codebase where every other Kaltura call passes one.
+3. The pager stopped when a page was shorter than requested, conflating "that was everything" with "the server returned less than it was asked for". It never read `totalCount`.
+4. The guard test above matched its own comment.
+
+Each narrowed its input without complaint, and each then reported a confident conclusion about the operator's data. Where a Kaltura call can return less than the truth, the code must now either prove completeness (`totalCount`) or say it could not — `web/src/lib/kalturaCategories.ts` reports *"checked against only N of M categories — the listing was read short, so these misses prove nothing"* rather than asserting a count it has not earned.
+
+### Status
+
+Shipped 2026-09-29 in `29dea65` (revision `video-sync-00249-r4n`). Untested at the time of writing: whether any *other* Kaltura API surface is entitlement-filtered in a way not covered above.
