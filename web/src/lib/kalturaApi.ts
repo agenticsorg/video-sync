@@ -185,3 +185,55 @@ export async function mintAdminKs(
   }
   return ks;
 }
+
+// ── Category listing memo (ADR-080 §4) ──────────────────────────────
+
+/**
+ * A resolved category listing, cached per partner for a short window.
+ *
+ * Reconciling one entry costs a full `category.list` — 163 categories
+ * on partner 5896392, paged. A backfill over eight records would read
+ * that same listing eight times, and an operator working through
+ * records by hand pays it once per click.
+ *
+ * Deliberately short-lived, and deliberately NOT consulted when a
+ * resolution misses. A stale cache that reports a category absent
+ * reproduces the exact bug this feature already shipped once — four
+ * real categories declared `not_found` against a listing that was a
+ * sixth of the truth. Paying one request to avoid repeating that is
+ * the right trade; see `invalidateCategoryCache`.
+ */
+const CATEGORY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface CategoryCacheEntry<T> {
+  value: T;
+  cachedAt: number;
+}
+
+const categoryCache = new Map<string, CategoryCacheEntry<unknown>>();
+
+/** Read a partner's cached listing, or undefined when cold or stale. */
+export function getCachedCategories<T>(partnerId: string): T | undefined {
+  const hit = categoryCache.get(partnerId);
+  if (!hit) return undefined;
+  if (Date.now() - hit.cachedAt >= CATEGORY_CACHE_TTL_MS) {
+    categoryCache.delete(partnerId);
+    return undefined;
+  }
+  return hit.value as T;
+}
+
+export function setCachedCategories<T>(partnerId: string, value: T): void {
+  categoryCache.set(partnerId, { value, cachedAt: Date.now() });
+}
+
+/**
+ * Drop a partner's listing.
+ *
+ * Called when a declared name fails to resolve, so the retry reads a
+ * fresh listing before anything reports `not_found`. A category
+ * created in the KMC a minute ago must not be invisible for five.
+ */
+export function invalidateCategoryCache(partnerId: string): void {
+  categoryCache.delete(partnerId);
+}

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Phase 1 shipped 2026-09-30; Phases 2–4 proposed |
 | **Date** | 2026-09-29 |
 | **Deciders** | Engineering, Content Operations |
 | **Supersedes** | — |
@@ -135,7 +135,7 @@ It is deliberately **not** in Phase 1: it needs a Rust schema change plus a WASM
 
 | Phase | Content | Blocked on |
 |---|---|---|
-| 1 | Scanner + driver + `CatchUpPanel` card, Destinations only; listing memo in `kalturaApi.ts` | — |
+| 1 | **Shipped 2026-09-30.** Scanner + driver + `CatchUpPanel` card, Destinations only; listing memo in `kalturaApi.ts` | — |
 | 2 | `observed_categories` on `DestinationOutcome`; scanner filters offline; Overview shows a real figure | Rust + WASM rebuild |
 | 3 | Origin-role entries, behind an explicit opt-in | A content-operations decision (§1) |
 | 4 | Fold categories and visibility into one reconcile action | ADR-077 §5 access-control mapping (KMC administrator) |

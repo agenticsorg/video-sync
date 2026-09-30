@@ -27,6 +27,9 @@ import {
   mintAdminKs,
   resolveKalturaCredentials,
   DISABLE_ENTITLEMENT,
+  getCachedCategories,
+  setCachedCategories,
+  invalidateCategoryCache,
 } from "../../../../lib/kalturaApi";
 import {
   planReconcile,
@@ -154,10 +157,18 @@ async function handler(req: NextRequest): Promise<NextResponse> {
     // contexts it is entitled to, and the rest of the category tree is
     // silently absent rather than refused. See DISABLE_ENTITLEMENT.
     const ks = await mintAdminKs(creds, { privileges: DISABLE_ENTITLEMENT });
-    const [{ categories, truncated, totalCount }, currentIds] = await Promise.all([
-      listAllCategories(ks),
+
+    // ADR-080 §4 — one listing per partner per window, not one per
+    // record. The membership read is always live; it is per-entry and
+    // is what the plan is computed against.
+    type Listing = { categories: KalturaCategory[]; truncated: boolean; totalCount: number | null };
+    const cached = getCachedCategories<Listing>(creds.partnerId);
+    const [listing, currentIds] = await Promise.all([
+      cached ? Promise.resolve(cached) : listAllCategories(ks).then(l => { setCachedCategories(creds.partnerId, l); return l; }),
       currentMembership(ks, entryId),
     ]);
+    let { categories, truncated, totalCount } = listing;
+    let fromCache = Boolean(cached);
     if (truncated) {
       // Resolving names against a partial catalog would report real
       // categories as "not_found" and invite someone to create a
@@ -168,7 +179,23 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const plan = planReconcile(declared, categories, currentIds);
+    let plan = planReconcile(declared, categories, currentIds);
+
+    // A miss against a CACHED listing proves nothing — the category
+    // may have been created since it was read. Re-read once before
+    // anyone is told a name does not exist. This is the guard that
+    // stops the memo reintroducing the bug it is an optimisation for.
+    if (fromCache && plan.unresolved.some(u => u.reason === "not_found" || u.reason === "listing_empty")) {
+      invalidateCategoryCache(creds.partnerId);
+      const fresh = await listAllCategories(ks);
+      setCachedCategories(creds.partnerId, fresh);
+      ({ categories, truncated, totalCount } = fresh);
+      fromCache = false;
+      plan = planReconcile(declared, categories, currentIds);
+      serverLog("info", "ext:kaltura-categories", "cache-miss-reread", {
+        rid, entryId, categories: categories.length,
+      });
+    }
 
     const added: ReconcileOutcome[] = [];
     const failed: ReconcileOutcome[] = [];
@@ -221,6 +248,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       // reaching this entry by some other route (the Zoom connector).
       categoriesListed: categories.length,
       categoriesReportedByKaltura: totalCount,
+      listingFromCache: fromCache,
       currentCategoryIds: currentIds,
       sample: categories.slice(0, SAMPLE_SIZE).map(c => c.fullName),
     });

@@ -28,6 +28,11 @@ import { getSeriesRegistry } from "../lib/seriesRegistryClient";
 import type { SeriesRegistryEntry } from "../lib/youtubeTitleAlign";
 import { findOrphanClips, runOrphanClipsRepair, type OrphanRepairProgressEvent } from "../lib/orphanClipsRepair";
 import {
+  findKalturaCategoryCandidatesNow,
+  runKalturaCategoryBackfill,
+  type KalturaCategoryProgressEvent,
+} from "../lib/kalturaCategoryBackfill";
+import {
   findRecordsNeedingOriginBackfill,
   findRecordsMissingZoomOriginLink,
   findOriginMergePairs,
@@ -553,6 +558,49 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
     [videos],
   );
   const originMergeCount = useMemo(() => findOriginMergePairs(videos).length, [videos]);
+
+  // ADR-080 Phase 1. The count is CANDIDATES, not defects: category
+  // membership is not in the catalog, so a pure scanner cannot know
+  // which entries are behind. Reconciliation is idempotent, so a
+  // compliant entry costs one read and no writes.
+  const [checkingCategories, setCheckingCategories] = useState(false);
+  const [categoryProgress, setCategoryProgress] = useState<{ index: number; total: number } | null>(null);
+  const [categorySummary, setCategorySummary] =
+    useState<{ applied: number; already: number; incomplete: number; errors: number } | null>(null);
+  const [categoryDetails, setCategoryDetails] = useState<string[]>([]);
+  const categoryCandidateCount = useMemo(() => findKalturaCategoryCandidatesNow(videos).length, [videos]);
+
+  async function runCategoryBackfill() {
+    setCheckingCategories(true);
+    setCategorySummary(null);
+    setCategoryProgress(null);
+    setCategoryDetails([]);
+    try {
+      await runKalturaCategoryBackfill(
+        (ev: KalturaCategoryProgressEvent) => {
+          if (ev.type === "item_done" && ev.index) {
+            setCategoryProgress({ index: ev.index, total: ev.total });
+            // Surface what did NOT fully land right on the card. An
+            // incomplete reconcile is the outcome most likely to need
+            // a human, and burying it in the event log is how the
+            // original problem stayed invisible.
+            const o = ev.outcome;
+            const title = ev.title ?? "record";
+            if (o?.kind === "incomplete") setCategoryDetails(d => [...d, `${title}: ${o.detail}`]);
+            else if (o?.kind === "error") setCategoryDetails(d => [...d, `${title}: ${o.error}`]);
+          } else if (ev.type === "complete" && ev.totals) {
+            setCategorySummary(ev.totals);
+            setCategoryProgress(null);
+          }
+        },
+        onEvent,
+      );
+    } catch (err) {
+      onEvent?.(`Kaltura category check errored: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setCheckingCategories(false);
+    }
+  }
 
   async function runOriginBackfill() {
     setOriginBackfilling(true);
@@ -1445,6 +1493,60 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
               </span>
             )}
           </div>
+        </div>
+
+        {/* Kaltura category reconcile — ADR-080 Phase 1. The count is
+            CANDIDATES, not defects: category membership lives on
+            Kaltura, not in the catalog, so a pure scanner cannot know
+            which entries are behind. Reconciliation is additive and
+            idempotent, so a compliant entry costs a read and no
+            writes — and the wording must not imply a number we have
+            not earned (ADR-080 §2). */}
+        <div style={{
+          marginTop: 12, padding: 10,
+          background: "rgba(234,179,8,0.05)", border: "1px solid rgba(234,179,8,0.28)", borderRadius: 4,
+          fontSize: "0.82rem",
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>🏷️ Kaltura category reconcile</div>
+          <div style={{ color: "var(--text-muted)", marginBottom: 8 }}>
+            Adds each published Kaltura entry to the categories its series declares. Additive — categories a
+            KMC administrator added by hand are never removed — and safe to re-run: an entry already in its
+            declared categories costs one read and no writes.
+            {categoryCandidateCount > 0 ? (
+              <> <strong>{categoryCandidateCount}</strong> published entr{categoryCandidateCount === 1 ? "y" : "ies"} to check.</>
+            ) : (
+              <> No published Kaltura entries whose series declares categories.</>
+            )}
+            <br />
+            <span style={{ fontSize: "0.76rem" }}>
+              This is a count of what will be <em>checked</em>, not of what is wrong — Kaltura holds the
+              category membership, so nothing local can tell which entries are behind without asking.
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              className="btn btn-sm btn-primary"
+              onClick={runCategoryBackfill}
+              disabled={checkingCategories || categoryCandidateCount === 0}
+              title="Reconcile each published Kaltura entry against its series' declared categories. Sequential, additive, and re-runnable."
+            >
+              {checkingCategories
+                ? categoryProgress ? `Checking ${categoryProgress.index}/${categoryProgress.total}…` : "Checking…"
+                : `Check categories${categoryCandidateCount ? ` (${categoryCandidateCount})` : ""}`}
+            </button>
+            {categorySummary && (
+              <span style={{ color: "var(--text-muted)" }}>
+                {categorySummary.applied} applied · {categorySummary.already} already compliant ·{" "}
+                {categorySummary.incomplete} incomplete · {categorySummary.errors}{" "}
+                error{categorySummary.errors === 1 ? "" : "s"}.
+              </span>
+            )}
+          </div>
+          {categoryDetails.length > 0 && (
+            <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "var(--danger, #c33)", fontSize: "0.76rem" }}>
+              {categoryDetails.map((d, i) => <li key={i}>{d}</li>)}
+            </ul>
+          )}
         </div>
 
         {/* Kaltura origin recovery (ADR-080 follow-up). Kaltura's Zoom
