@@ -35,6 +35,7 @@
 
 import type { SeriesRegistryEntry, DestinationSpec } from "./youtubeTitleAlign";
 import { parseZoomReferenceId } from "./kalturaZoomOrigin";
+import { planReconcile, type KalturaCategory, type CategoryResolution } from "./kalturaCategories";
 
 /** Three-letter weekday as `Intl` renders it, e.g. "Thu". */
 export type Weekday = "Sun" | "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat";
@@ -80,10 +81,26 @@ export interface SweepMatch {
   local: string;
   /** Minutes from the declared show start; negative is the pre-show. */
   offset_minutes: number;
-  /** Declared category ids/names still to be applied. */
+  /** Exactly what the series declared, unresolved. */
+  declared: string[];
+  /**
+   * Category IDS still to apply.
+   *
+   * Resolved against the partner's category list, NOT compared as
+   * strings. The registry declares full-path NAMES
+   * ("mediaspace_8DEe6>site>galleries>Weekly Recordings") while
+   * Kaltura's media.list returns numeric ids ("370373752"). The first
+   * version of this compared the two directly, so nothing ever
+   * matched: a live plan reported 64 categories to add across 16
+   * entries — four per entry, including @zoomCategory@, which every
+   * one of them already had. The apply step would then have rejected
+   * all 64 as "not a numeric category id".
+   */
   missing: string[];
-  /** Declared values the entry already has. */
+  /** Declared values the entry already has, as resolved ids. */
   present: string[];
+  /** Declared values that resolved to nothing. Reported, never guessed. */
+  unresolved: CategoryResolution[];
 }
 
 export interface SweepSkip {
@@ -162,6 +179,7 @@ function hhmmToMinutes(hhmm: string): number | null {
 export function matchEntry(
   entry: SweepEntry,
   eligible: SeriesRegistryEntry[],
+  catalog?: KalturaCategory[],
 ): { match: SweepMatch } | { skip: SweepSkip } {
   const origin = parseZoomReferenceId(entry.reference_id);
   if (!origin) {
@@ -182,7 +200,12 @@ export function matchEntry(
     if (offset < -SWEEP_WINDOW_BEFORE_MIN || offset > SWEEP_WINDOW_AFTER_MIN) continue;
 
     const declared = declaredCategories(series);
-    const have = new Set(entry.category_ids);
+    // Resolution needs the partner's category list. Without it the
+    // match is still correct — which series, and when — but the
+    // category arithmetic is unknown rather than guessed at.
+    const plan = catalog
+      ? planReconcile(declared, catalog, entry.category_ids.map(Number).filter(Number.isFinite))
+      : null;
     return {
       match: {
         entry,
@@ -190,8 +213,10 @@ export function matchEntry(
         recorded_at: origin.recorded_at,
         local: parts.label,
         offset_minutes: offset,
-        missing: declared.filter(d => !have.has(d)),
-        present: declared.filter(d => have.has(d)),
+        declared,
+        missing: plan ? plan.toAdd.map(t => String(t.id)) : [],
+        present: plan ? plan.alreadyPresent.map(t => String(t.id)) : [],
+        unresolved: plan ? plan.unresolved : [],
       },
     };
   }
@@ -208,12 +233,16 @@ export interface SweepPlan {
 }
 
 /** The whole plan for a set of entries. Pure — nothing is written. */
-export function planSweep(entries: SweepEntry[], registry: SeriesRegistryEntry[]): SweepPlan {
+export function planSweep(
+  entries: SweepEntry[],
+  registry: SeriesRegistryEntry[],
+  catalog?: KalturaCategory[],
+): SweepPlan {
   const eligible = eligibleSeries(registry);
   const matches: SweepMatch[] = [];
   const skips: SweepSkip[] = [];
   for (const e of entries) {
-    const r = matchEntry(e, eligible);
+    const r = matchEntry(e, eligible, catalog);
     if ("match" in r) matches.push(r.match);
     else skips.push(r.skip);
   }

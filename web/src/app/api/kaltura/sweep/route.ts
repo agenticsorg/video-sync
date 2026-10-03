@@ -29,11 +29,43 @@ import {
 } from "../../../../lib/kalturaApi";
 import { readSeriesRegistryServer } from "../../../../lib/destinationResolverServer";
 import { planSweep, type SweepEntry, type SweepPlan } from "../../../../lib/kalturaSweepMatcher";
+import type { KalturaCategory } from "../../../../lib/kalturaCategories";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 500;
 const MAX_PAGES = 8;
+
+/**
+ * Every category on the partner, so declared NAMES can be resolved to
+ * the numeric ids Kaltura's media.list reports.
+ *
+ * The registry holds full paths like
+ * "mediaspace_8DEe6>site>galleries>Weekly Recordings"; entries carry
+ * "370373752". Without this listing the two are compared as strings
+ * and nothing ever matches.
+ */
+async function listCategories(ks: string): Promise<KalturaCategory[]> {
+  const out: KalturaCategory[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const res = await kalturaCall("category", "list", {
+      ks,
+      filter: { objectType: "KalturaCategoryFilter" },
+      pager: { pageSize: PAGE_SIZE, pageIndex: page, objectType: "KalturaFilterPager" },
+    });
+    const { objects, totalCount } = unwrapList<{ id?: number | string; name?: string; fullName?: string }>(res);
+    for (const o of objects) {
+      const id = Number(o.id);
+      if (!Number.isFinite(id)) continue;
+      const name = String(o.name ?? "");
+      out.push({ id, name, fullName: String(o.fullName ?? name) });
+    }
+    if (objects.length === 0) break;
+    if (totalCount !== null && out.length >= totalCount) break;
+    if (totalCount === null && objects.length < PAGE_SIZE) break;
+  }
+  return out;
+}
 
 /** Entries created in the window, with the fields matching needs. */
 async function listEntries(ks: string, from?: string, to?: string): Promise<{ entries: SweepEntry[]; truncated: boolean }> {
@@ -104,9 +136,11 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const plan: SweepPlan = planSweep(entries, registry);
+    const categories = await listCategories(ks);
+    const plan: SweepPlan = planSweep(entries, registry, categories);
     serverLog("info", "ext:kaltura-sweep", apply ? "applying" : "planned", {
-      rid, scanned: entries.length, matched: plan.matches.length, operations: plan.operations, apply,
+      rid, scanned: entries.length, matched: plan.matches.length,
+      operations: plan.operations, categories: categories.length, apply,
     });
 
     if (!apply) {

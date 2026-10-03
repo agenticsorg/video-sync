@@ -26,7 +26,18 @@ const ENTRIES: SweepEntry[] = JSON.parse(
   readFileSync(join(__dirname, "fixtures/kaltura-survey-2026-10-03.json"), "utf-8"),
 );
 
-const CATS = ["364214852", "370465892", "370407052", "370373752"];
+/** The partner's real category list, from the same survey. */
+const CATALOG = JSON.parse(
+  readFileSync(join(__dirname, "fixtures/kaltura-categories-2026-10-03.json"), "utf-8"),
+);
+
+/** What the registry actually declares: full-path NAMES, not ids. */
+const CATS = [
+  "@zoomCategory@",
+  "2361952EPea2653e>site>channels>Agentics.org Video Portal",
+  "mediaspace_8DEe6>site>channels>Ai Hackerspace Live Recordings",
+  "mediaspace_8DEe6>site>galleries>Weekly Recordings",
+];
 
 const series = (name: string, days: string[], over: Partial<SeriesRegistryEntry> = {}) => ({
   series_name: name,
@@ -45,7 +56,7 @@ const REGISTRY = [
 ];
 
 describe("against the real 127-entry account", () => {
-  const plan = planSweep(ENTRIES, REGISTRY);
+  const plan = planSweep(ENTRIES, REGISTRY, CATALOG);
 
   it("claims exactly the 16 weekly show recordings", () => {
     expect(plan.matches).toHaveLength(16);
@@ -56,7 +67,31 @@ describe("against the real 127-entry account", () => {
       "Agentics Live Vibe - Coding": 8,
       "Friday Hackerspace Live Events": 8,
     });
-    expect(plan.operations).toBe(48);   // 16 x 3 portal categories
+    // 3 per entry, not 4: every surveyed entry was already in
+    // @zoomCategory@, so only the three portal categories are missing.
+    // The first version compared declared NAMES against Kaltura's
+    // numeric ids and reported 64 — four per entry, including the one
+    // they all had. Live plan caught it; this pins it.
+    expect(plan.operations).toBe(48);
+  });
+
+  it("resolves declared names to ids rather than string-comparing them", () => {
+    const m = plan.matches.find(x => x.entry.id === "1_b8kw2g8u")!;
+    expect(m.declared).toEqual(CATS);                       // names in
+    expect(m.present).toEqual(["364214852"]);               // @zoomCategory@, resolved
+    expect(m.missing).toEqual(["370465892", "370407052", "370373752"]);
+    expect(m.unresolved).toEqual([]);
+    // Every value written is a numeric id the apply step accepts.
+    for (const id of m.missing) expect(id).toMatch(/^\d+$/);
+  });
+
+  it("reports nothing to do once the categories are applied", () => {
+    // The live state after the one-off script: all four present.
+    const applied = ENTRIES.map(e => e.id === "1_b8kw2g8u"
+      ? { ...e, category_ids: ["364214852", "370465892", "370407052", "370373752"] } : e);
+    const m = planSweep(applied, REGISTRY, CATALOG).matches.find(x => x.entry.id === "1_b8kw2g8u")!;
+    expect(m.missing).toEqual([]);
+    expect(m.present).toHaveLength(4);
   });
 
   it("claims the entries confirmed against catalog ground truth", () => {
