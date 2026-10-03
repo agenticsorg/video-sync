@@ -112,6 +112,11 @@ fi
 # routes pass already checks every source file a route reaches, and
 # the source pass covers the rest. Each half fits in ~2.7GB.
 #
+# Verified 2026-10-03 on a 32GB machine by negative control: a
+# deliberate `const x: number = "s"` in web/src/lib made pass 1 report
+# error TS2322 and the deploy exit 2 WITHOUT reaching Cloud Build. A
+# gate that cannot be shown to fail is not a gate.
+#
 # SINGLE_TYPECHECK=1 forces the old one-pass behaviour.
 echo "==> Pre-flight type check (tsc --noEmit)"
 if [ "${SINGLE_TYPECHECK:-0}" = "1" ]; then
