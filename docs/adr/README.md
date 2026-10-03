@@ -85,7 +85,8 @@ This directory contains the Architecture Decision Records for **video-sync** (a.
 | [ADR-077](ADR-077-first-class-publish-destinations.md) | First-Class Publish Destinations — Per-Destination Outcomes | Accepted — three decisions resolved 2026-08-23; §1, §2, §3 shipped; §5 Drive half shipped, Kaltura half blocked on the KMC access-control mapping |
 | [ADR-078](ADR-078-google-drive-folder-as-source.md) | Google Drive Folder as a Source | Proposed |
 | [ADR-079](ADR-079-advance-to-published-pipeline.md) | Advance to Published — One Pipeline for Card, Bulk, and Agent | Proposed |
-| [ADR-080](ADR-080-kaltura-category-backfill.md) | Kaltura Category Backfill in Maintain | Phase 1 shipped 2026-09-30; Phases 2–4 proposed |
+| [ADR-080](ADR-080-kaltura-category-backfill.md) | Kaltura Category Backfill in Maintain | Phase 1 shipped 2026-09-30; Phase 2 proposed; Phase 3 withdrawn — superseded by ADR-081 (2026-10-03) |
+| [ADR-081](ADR-081-kaltura-portal-category-sweep.md) | Kaltura Portal Category Sweep — Schedule-Derived Series Assignment | Proposed |
 
 ## ADR Format
 

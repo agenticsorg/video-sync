@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Phase 1 shipped 2026-09-30; Phases 2–4 proposed |
+| **Status** | Phase 1 shipped 2026-09-30; Phase 2 proposed; Phase 3 withdrawn — superseded by ADR-081 (2026-10-03) |
 | **Date** | 2026-09-29 |
 | **Deciders** | Engineering, Content Operations |
 | **Supersedes** | — |
@@ -137,7 +137,7 @@ It is deliberately **not** in Phase 1: it needs a Rust schema change plus a WASM
 |---|---|---|
 | 1 | **Shipped 2026-09-30.** Scanner + driver + `CatchUpPanel` card, Destinations only; listing memo in `kalturaApi.ts` | — |
 | 2 | `observed_categories` on `DestinationOutcome`; scanner filters offline; Overview shows a real figure | Rust + WASM rebuild |
-| 3 | Origin-role entries, behind an explicit opt-in | A content-operations decision (§1) |
+| 3 | ~~Origin-role entries, behind an explicit opt-in~~ **Withdrawn 2026-10-03 — superseded by ADR-081** | — |
 | 4 | Fold categories and visibility into one reconcile action | ADR-077 §5 access-control mapping (KMC administrator) |
 
 ---
@@ -218,3 +218,24 @@ Shipped 2026-09-29:
 Phase 3 is no longer "should we write to content we don't own". The remaining question is narrower and empirical: **after the merge, which Kaltura entries still lack their series' categories?** Some will need nothing — the connector already files its entries into `@zoomCategory@` and the per-event roots. The Phase 3 row should be read as *"apply §1's category reconcile to entries that arrived via the connector"*, and it cannot be sized until step 1 has run.
 
 The §1 paragraph beginning "The distinction matters" is superseded by this addendum.
+
+---
+
+## Addendum: Phase 3 Superseded by ADR-081 (2026-10-03)
+
+**Addendum to**: §1's scope and the Phase 3 row.
+
+This ADR scopes itself to Kaltura entries the catalog holds records for, and defers `Origin`-role entries to a Phase 3. A survey of partner 5896392 on 2026-10-03 showed that framing is too small for the problem it was meant to address.
+
+**127 entries exist on the partner since 2026-06-01. The catalog holds 14 of them — about 11%.** Kaltura ingests from Zoom automatically on notification, so new uncategorised entries appear every weekday without this app's involvement. A catalog-driven reconcile cannot reach the other 89%, and the share only improves if someone imports more.
+
+**None of the 127 is in any portal channel.** 121 sit in `@zoomCategory@` only and six have no category at all, so the entire library since June is invisible in MediaSpace.
+
+Two further findings that change the approach rather than its scale:
+
+- **Kaltura rewrites entry names with AI-generated titles.** The registry's `^.*Hackerspace.*` / `^.*Vibe.*` patterns match 11 of 127. Series assignment by keyword has been working by luck of keyword retention.
+- **Private internal meetings share the account**, in the same time band as the public shows — Monday 11:58 is a Committee Meeting, Friday 11:45 is the public show. Any Kaltura-side rule therefore needs an allowlist and a reviewed dry-run before writing, which is a stronger safety model than this ADR's one-click card needs.
+
+**ADR-081** takes that work: a Kaltura-side sweep with schedule-derived series assignment, `scheduled_days` on the registry, and a dry-run gate. Phase 3 here is withdrawn. Phases 1 and 2 stand — Phase 1 shipped, and the catalog-side reconcile remains correct for entries this app published, whose `referenceId` is the catalog UUID rather than a connector value and which therefore cannot be matched by ADR-081 §2.
+
+The earlier addendum on this page corrected the *rationale* for deferring Origin-role entries. This one withdraws the phase itself: the question was never ownership or scope, it was that the tool was pointed at the wrong inventory.
