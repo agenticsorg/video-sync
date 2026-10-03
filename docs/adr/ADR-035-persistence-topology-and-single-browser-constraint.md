@@ -188,3 +188,14 @@ Limitations vs. the original spec: no SQLite (Tier 2), no pagination (whole cata
 - **ADR-018**: Google Cloud Hosting — the FUSE mount spec lives here; addendum documents its deferred state (Level 1 blocker).
 - **ADR-031**: Server-Side Rule Persistence — first server-side state; template for Level 2's catalog migration.
 - **ADR-033**: Multi-origin dedupe — the "Find duplicates" scan in Q3 benefits significantly from Level 2.
+---
+
+## Addendum: Last-Writer-Wins Is Too Coarse (2026-10-03)
+
+**Addendum to**: the last-writer-wins rule and the single-browser constraint.
+
+Two data-loss incidents four days apart (2026-09-29, 2026-10-03) destroyed `metadata_extra` keys and truncated generated descriptions — not through malformed writes, but through ordinary mutations from a browser tab whose copy of a record predated the server's.
+
+`syncWithServer` adopts the server's copy only when it is newer, and runs at boot; `mutate()` touches `lastModified` to now, making a stale copy authoritative by the act of touching it; the push and `POST /api/catalog` both operate on whole records. The single-browser constraint this ADR names is the assumption being violated, and nothing enforces or even warns about it.
+
+**ADR-082** narrows the rule: `metadata_extra` merges key-wise at the write boundary, and a description may not silently shrink to a prefix of itself. Everything else keeps last-writer-wins.
