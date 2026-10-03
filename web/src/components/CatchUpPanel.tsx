@@ -27,6 +27,7 @@ import { runYouTubeTitleAlignBackfill, findRecordsNeedingTitleAlignment, findRec
 import { getSeriesRegistry } from "../lib/seriesRegistryClient";
 import type { SeriesRegistryEntry } from "../lib/youtubeTitleAlign";
 import { findOrphanClips, runOrphanClipsRepair, type OrphanRepairProgressEvent } from "../lib/orphanClipsRepair";
+import type { SweepMatch } from "../lib/kalturaSweepMatcher";
 import {
   findKalturaCategoryCandidatesNow,
   runKalturaCategoryBackfill,
@@ -569,6 +570,46 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
     useState<{ applied: number; already: number; incomplete: number; errors: number } | null>(null);
   const [categoryDetails, setCategoryDetails] = useState<string[]>([]);
   const categoryCandidateCount = useMemo(() => findKalturaCategoryCandidatesNow(videos).length, [videos]);
+
+  // ADR-081 — Kaltura portal sweep. Two steps on purpose: the plan
+  // is read before anything is written, because a mis-match here
+  // makes a PRIVATE meeting visible on the public portal rather than
+  // mis-filing our own content.
+  const [sweeping, setSweeping] = useState(false);
+  const [sweepPlan, setSweepPlan] = useState<
+    { matches: SweepMatch[]; operations: number; scanned: number; skipped: number; alreadyComplete: number } | null
+  >(null);
+  const [sweepResult, setSweepResult] = useState<{ added: number; failed: number } | null>(null);
+  const [sweepError, setSweepError] = useState<string | null>(null);
+  const [sweepFrom, setSweepFrom] = useState("2026-06-01");
+
+  async function runSweep(apply: boolean) {
+    setSweeping(true);
+    setSweepError(null);
+    if (!apply) { setSweepPlan(null); setSweepResult(null); }
+    try {
+      const res = await fetch("/api/kaltura/sweep", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: sweepFrom, apply }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `sweep failed (${res.status})`);
+      if (apply) {
+        setSweepResult({ added: data.added, failed: data.failed });
+        onEvent?.(`Kaltura portal sweep applied — ${data.added} categories added across ${data.outcomes?.length ?? 0} entries, ${data.failed} failed`);
+        setSweepPlan(null);
+      } else {
+        setSweepPlan(data);
+        onEvent?.(`Kaltura portal sweep planned — ${data.matches.length} of ${data.scanned} entries matched, ${data.operations} categories to add`);
+      }
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      setSweepError(m);
+      onEvent?.(`Kaltura portal sweep errored: ${m}`);
+    } finally {
+      setSweeping(false);
+    }
+  }
 
   async function runCategoryBackfill() {
     setCheckingCategories(true);
@@ -1493,6 +1534,86 @@ export default function CatchUpPanel({ open, videos, onEvent, onClose, variant =
               </span>
             )}
           </div>
+        </div>
+
+        {/* ADR-081 — Kaltura portal sweep. Kaltura ingests from Zoom
+            automatically, so the account holds far more than the
+            catalog and NONE of it reaches the MediaSpace portal. This
+            matches entries to a series by weekday + recording time
+            (the connector's referenceId carries the true start) and
+            adds the declared portal categories. Plan first: private
+            internal meetings share the account. */}
+        <div style={{
+          marginTop: 12, padding: 10,
+          background: "rgba(168,85,247,0.05)", border: "1px solid rgba(168,85,247,0.28)", borderRadius: 4,
+          fontSize: "0.82rem",
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>📡 Kaltura portal sweep</div>
+          <div style={{ color: "var(--text-muted)", marginBottom: 8 }}>
+            Finds Kaltura recordings that belong to a series and adds the portal categories they are missing —
+            whether or not the recording is in this catalog. Matching is by <strong>weekday + recording time</strong> in
+            the series timezone, never by title: Kaltura renames entries with AI-generated titles, so the
+            registry&apos;s keyword patterns match about one in twelve.
+            <br />
+            A series is only eligible when it declares <code>scheduled_days</code>, a window, a timezone{" "}
+            <em>and</em> Kaltura <code>category_ids</code>. Everything else is skipped — private meetings share
+            this Zoom/Kaltura account, and weekday is the only thing separating them from the public shows.
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
+              from{" "}
+              <input
+                type="date" value={sweepFrom} onChange={(e) => setSweepFrom(e.target.value)}
+                style={{ padding: "3px 6px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text)", fontSize: "0.78rem" }}
+              />
+            </label>
+            <button className="btn btn-sm btn-primary" onClick={() => runSweep(false)} disabled={sweeping}
+              title="Read Kaltura and show exactly what would be categorised. Writes nothing.">
+              {sweeping && !sweepPlan ? "Planning…" : "1. Plan sweep"}
+            </button>
+            <button className="btn btn-sm" onClick={() => runSweep(true)}
+              disabled={sweeping || !sweepPlan || sweepPlan.operations === 0}
+              title="Apply the plan above. Additive — no category is ever removed.">
+              {sweeping && sweepPlan ? "Applying…" : `2. Apply${sweepPlan ? ` (${sweepPlan.operations})` : ""}`}
+            </button>
+            {sweepResult && (
+              <span style={{ color: "var(--text-muted)" }}>
+                Applied: {sweepResult.added} added · {sweepResult.failed} failed.
+              </span>
+            )}
+          </div>
+          {sweepError && (
+            <div style={{ marginTop: 8, color: "var(--danger, #c33)", fontSize: "0.78rem" }}>{sweepError}</div>
+          )}
+          {sweepPlan && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ color: "var(--text-muted)", fontSize: "0.78rem", marginBottom: 4 }}>
+                Scanned {sweepPlan.scanned} · matched <strong>{sweepPlan.matches.length}</strong> ·{" "}
+                {sweepPlan.operations} categories to add · {sweepPlan.alreadyComplete} already complete ·{" "}
+                {sweepPlan.skipped} left alone
+              </div>
+              {sweepPlan.matches.length === 0 ? (
+                <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                  Nothing matched. If that is unexpected, check the series has <code>scheduled_days</code> set.
+                </div>
+              ) : (
+                <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 4 }}>
+                  <table style={{ width: "100%", fontSize: "0.74rem", borderCollapse: "collapse" }}>
+                    <tbody>
+                      {sweepPlan.matches.map((m) => (
+                        <tr key={m.entry.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "3px 6px", fontFamily: "monospace", whiteSpace: "nowrap" }}>{m.local}</td>
+                          <td style={{ padding: "3px 6px", whiteSpace: "nowrap" }}>{m.series_name}</td>
+                          <td style={{ padding: "3px 6px", color: "var(--text-muted)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.entry.name}</td>
+                          <td style={{ padding: "3px 6px", textAlign: "right", whiteSpace: "nowrap" }}>+{m.missing.length}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Kaltura category reconcile — ADR-080 Phase 1. The count is

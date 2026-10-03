@@ -47,6 +47,15 @@ export interface SeriesRegistryEntry {
    *  e.g. "America/New_York". All three must be set for the
    *  window to take effect. */
   scheduled_timezone?: string;
+  /** ADR-081 §5 — weekdays the show runs on, as three-letter
+   *  abbreviations: ["Thu"], ["Mon","Wed"]. Required for the
+   *  Kaltura portal sweep, and absent means ineligible.
+   *
+   *  Weekday is the ONLY thing separating the public shows from
+   *  the internal meetings that share the Zoom/Kaltura account:
+   *  Monday 11:58 is a Committee Meeting, Friday 11:45 is the
+   *  public show. A time-only rule would publish the former. */
+  scheduled_days?: string[];
   /** ADR-062 — which summary sections drive highlight extraction
    *  when building a stitched clip source. Default when omitted:
    *  ["M", "C"] (Key Moments + Chat-Sparked). */

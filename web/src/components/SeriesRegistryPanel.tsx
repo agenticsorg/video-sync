@@ -113,6 +113,7 @@ export default function SeriesRegistryPanel() {
           scheduled_start_local?: string;
           scheduled_end_local?: string;
           scheduled_timezone?: string;
+          scheduled_days?: string[];
           destinations?: DestinationSpec[];
         } = {
           series_name: r.series_name.trim(),
@@ -128,6 +129,11 @@ export default function SeriesRegistryPanel() {
           out.scheduled_end_local = e;
           out.scheduled_timezone = tz;
         }
+        // ADR-081 §5 — weekdays the show runs on. Comma or space
+        // separated on input; stored as an array.
+        const days = (Array.isArray(r.scheduled_days) ? r.scheduled_days.join(",") : String(r.scheduled_days ?? ""))
+          .split(/[,\s]+/).map(d => d.trim()).filter(Boolean);
+        if (days.length > 0) out.scheduled_days = days;
         if (r.destinations && r.destinations.length > 0) {
           out.destinations = r.destinations;
         }
@@ -290,6 +296,17 @@ export default function SeriesRegistryPanel() {
                           placeholder="America/New_York"
                           style={{ flex: "1 1 130px", minWidth: 130, padding: "4px 6px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text)", fontSize: "0.78rem", fontFamily: "monospace" }}
                           title="IANA zone (e.g. America/New_York, Europe/London)"
+                        />
+                        {/* ADR-081 §5 — weekday is the ONLY thing separating
+                            the public shows from the internal meetings that
+                            share the Zoom/Kaltura account, so the portal sweep
+                            will not touch a series without it. */}
+                        <input
+                          value={Array.isArray(r.scheduled_days) ? r.scheduled_days.join(",") : (r.scheduled_days ?? "")}
+                          onChange={(e) => updateRow(r._uid, { scheduled_days: e.target.value as unknown as string[] })}
+                          placeholder="Thu"
+                          style={{ width: 90, padding: "4px 6px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text)", fontSize: "0.78rem", fontFamily: "monospace" }}
+                          title="ADR-081 — weekdays the show runs on (Mon,Tue,Wed,Thu,Fri,Sat,Sun). Required before the Kaltura portal sweep will categorise this series; without it the sweep skips it entirely."
                         />
                       </div>
                     </td>

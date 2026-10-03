@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Phases 1–4 implemented 2026-10-03; Phase 4 ships plan-only by default |
 | **Date** | 2026-10-03 |
 | **Deciders** | Engineering, Content Operations |
 | **Supersedes** | — |
@@ -136,10 +136,10 @@ Seeded as `["Thu"]` for *Agentics Live Vibe - Coding* and `["Fri"]` for *Friday 
 
 | Phase | Content | Blocked on |
 |---|---|---|
-| 1 | `scheduled_days` on the registry + editor; pure matcher with its test corpus | — |
-| 2 | Sweep route (`media.list` paged, `disableentitlement`) and dry-run report | Phase 1 |
-| 3 | Apply, reusing ADR-080's reconciler; per-entry outcomes logged | Operator review of a Phase 2 report |
-| 4 | Run on a schedule, so new recordings are categorised within hours rather than at the next sweep | Phase 3 proving stable |
+| 1 | **Shipped.** `scheduled_days` on the registry + editor; pure matcher, tested against the real 127-entry survey | — |
+| 2 | **Shipped.** `/api/kaltura/sweep`, `apply` defaulting to false; plan table on the Maintain card | — |
+| 3 | **Shipped.** Apply behind the reviewed plan; per-entry outcomes logged | — |
+| 4 | **Shipped plan-only.** `scripts/kaltura-sweep-schedule.sh` (Cloud Scheduler, Thu+Fri 16:00 ET). `--apply` is opt-in | Review of a few scheduled plans before enabling `--apply` |
 
 Phase 4 is the one that matters long-term: the connector produces new uncategorised entries every weekday, so a one-off sweep returns the library to invisibility within a week.
 
@@ -177,3 +177,24 @@ Phase 4 is the one that matters long-term: the connector produces new uncategori
 - **ADR-060**: the scheduled show windows this ADR reuses, and extends with `scheduled_days`.
 - **ADR-075**: where `category_ids` is declared.
 - **ADR-080**: the catalog-side reconcile whose reconciler this reuses, and whose Phase 3 this supersedes.
+
+
+---
+
+## Addendum: Phase 4 Ships Plan-Only (2026-10-03)
+
+**Addendum to**: the Phase 4 row, and its tension with §4.
+
+Phase 4 says "run on a schedule, so new recordings are categorised within hours". §4 says nothing is written until an operator reads the plan. Those pull in opposite directions and the table did not say which wins.
+
+**§4 wins, for now.** `scripts/kaltura-sweep-schedule.sh` creates a Cloud Scheduler job that runs the sweep in **plan mode**; `--apply` is an explicit opt-in.
+
+The reasoning is the same one that shaped §3: a false positive makes a private meeting visible on the public portal, and the Monday Committee Meeting runs ten minutes either side of the Friday show. The allowlist makes an unattended apply defensible — the sweep can only touch a series an operator explicitly gave `scheduled_days` — but defensible is not verified, and nothing has yet run unattended.
+
+A plan-only job still delivers most of Phase 4's value. The summary lands in Cloud Logging under `ext:kaltura-sweep` within hours of a recording appearing, so the drift is **visible** rather than discovered a month later. What it does not do is close the loop without a human.
+
+Switch to `--apply` once several scheduled plans have been reviewed and were right every time. That is a judgement about accumulated evidence, not a code change.
+
+### One honest limitation
+
+The `from` date is baked into the job's message body when the script runs, because Cloud Scheduler bodies are static. A job created today looks back 14 days from today, forever. Options, none yet taken: re-run the script periodically, or give the route a `lookback_days` parameter it resolves at request time. The second is better and is a small change; it is called out here rather than left as a surprise.

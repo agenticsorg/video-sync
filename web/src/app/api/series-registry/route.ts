@@ -27,6 +27,8 @@ interface RegistryEntry {
   scheduled_start_local?: string;
   scheduled_end_local?: string;
   scheduled_timezone?: string;
+  /** ADR-081 §5 — weekdays the show runs on, e.g. ["Thu"]. */
+  scheduled_days?: string[];
 }
 
 interface RegistryConfig {
