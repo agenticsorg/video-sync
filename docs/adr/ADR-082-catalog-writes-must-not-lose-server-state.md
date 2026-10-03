@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Accepted — implemented 2026-10-03 |
 | **Date** | 2026-10-03 |
 | **Deciders** | Engineering |
 | **Supersedes** | — |
@@ -66,7 +66,9 @@ The protection moves to the boundary every write already passes through, rather 
 
 The incoming record's `metadata_extra` is merged over the stored one rather than replacing it. A key present on the server and absent from the push is **kept**.
 
-This makes key removal impossible through the normal path. That is the correct default: every key in this map was written by something that had a reason, and no current caller legitimately needs to remove one. A caller that genuinely must delete a key uses the aggregate's existing explicit-null convention (`apply_metadata_edits` removes on `null`), which survives the merge because `null` is a present value.
+This makes key removal impossible through the normal path. That is the correct default: every key in this map was written by something that had a reason, and no current caller legitimately needs to remove one.
+
+**Correction (2026-10-03, during implementation).** This section originally claimed a caller could still delete a key via the aggregate's explicit-null convention, "which survives the merge because `null` is a present value". That is wrong. `apply_metadata_edits` removes the key *in the browser*, so the pushed record simply lacks it — indistinguishable from a stale push, and the merge restores it. Deletion through the push path is genuinely impossible now. Nothing needs it today; a caller that comes to need one will add an explicit per-record opt-out, as §2 has for descriptions.
 
 ### §2 A description may not shrink silently
 

@@ -4,6 +4,7 @@ import { join } from "path";
 import { withRequestLogging, serverLog } from "../../../lib/serverLogger";
 import { getActor } from "../../../lib/auth";
 import { readCatalog, writeCatalog, withLock, CatalogUnavailableError, type CatalogStore } from "../../../lib/catalogStore";
+import { protectRecordWrite, type WriteProtection } from "../../../lib/catalogWriteProtection";
 
 // ADR-035 Level 2 — server-side catalog. Records persisted as
 // WASM-serialised JSON strings, keyed by record id, with a sidecar
@@ -52,7 +53,7 @@ async function postHandler(req: NextRequest) {
   if (actor.role === "Viewer") {
     return NextResponse.json({ error: "Contributor+ required to write records" }, { status: 403 });
   }
-  interface Item { id?: string; json?: string; lastModified?: string }
+  interface Item { id?: string; json?: string; lastModified?: string; allowDescriptionShrink?: boolean }
   let body: Item & { records?: Item[] };
   try {
     body = await req.json();
@@ -64,7 +65,7 @@ async function postHandler(req: NextRequest) {
   // a burst of client mutations doesn't stack against the serialized
   // writeQueue and time out at Cloud Run's 30s request cap.
   const items: Item[] = Array.isArray(body.records) ? body.records : [body];
-  const validated: Array<{ id: string; json: string; ts: string }> = [];
+  const validated: Array<{ id: string; json: string; ts: string; allowDescriptionShrink?: boolean }> = [];
   const isContributor = actor.role === "Contributor";
   for (const it of items) {
     if (!it.id || typeof it.id !== "string") {
@@ -89,7 +90,11 @@ async function postHandler(req: NextRequest) {
     } catch {
       return NextResponse.json({ error: `json malformed on record ${it.id}` }, { status: 400 });
     }
-    validated.push({ id: it.id, json: it.json, ts: it.lastModified ?? new Date().toISOString() });
+    validated.push({
+      id: it.id, json: it.json,
+      ts: it.lastModified ?? new Date().toISOString(),
+      allowDescriptionShrink: it.allowDescriptionShrink === true,
+    });
   }
   return withLock(async () => {
     let current: CatalogStore;
@@ -105,12 +110,32 @@ async function postHandler(req: NextRequest) {
       }
       throw err;
     }
+    // ADR-082 — a push carries a whole record, and a stale tab's
+    // whole record is missing whatever it never saw. Merge the two
+    // fields where that loss is silent and unrecoverable before
+    // storing. Everything else keeps ADR-035's last-writer-wins.
+    const protections: WriteProtection[] = [];
     for (const v of validated) {
-      current.records[v.id] = v.json;
+      const guarded = protectRecordWrite(v.id, current.records[v.id], v.json, {
+        allowDescriptionShrink: v.allowDescriptionShrink,
+      });
+      protections.push(...guarded.protections);
+      current.records[v.id] = guarded.json;
       current.lastModified[v.id] = v.ts;
     }
     await writeCatalog(current);
-    return NextResponse.json({ ok: true, count: validated.length });
+    // §4 — say when something was refused. Silence is what let both
+    // 2026-09-29 and 2026-10-03 run unnoticed; the write now succeeds
+    // either way, so without this nobody learns a stale tab is
+    // pushing.
+    if (protections.length > 0) {
+      serverLog("warn", "api:catalog", "write-protected", {
+        actor: actor.email,
+        count: protections.length,
+        protections: protections.slice(0, 20),
+      });
+    }
+    return NextResponse.json({ ok: true, count: validated.length, protected: protections.length });
   });
 }
 

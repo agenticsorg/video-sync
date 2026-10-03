@@ -668,4 +668,40 @@ export async function bootStore(): Promise<void> {
   videoStore.hydrate();
   // Server sync runs in the background — don't block UI on it.
   videoStore.syncWithServer().catch(() => {/* logged inside */});
+  installFocusResync();
+}
+
+/**
+ * ADR-082 §5 — re-sync when a tab comes back after being away.
+ *
+ * syncWithServer otherwise runs only at boot, so a tab left open for
+ * days holds records frozen at load time. Mutating one of those makes
+ * it authoritative (mutate() touches lastModified to now), and the
+ * push overwrites whatever the server gained meanwhile. That is how
+ * both the 2026-09-29 and 2026-10-03 losses happened.
+ *
+ * This is a MITIGATION, not the fix. It narrows the window; ADR-082
+ * §1–§2 close the consequence at the write boundary. Shipping only
+ * this would have made both incidents rarer and harder to diagnose,
+ * which is worse than having them reproducible.
+ */
+const FOCUS_RESYNC_AFTER_MS = 5 * 60 * 1000;
+let focusResyncInstalled = false;
+
+export function installFocusResync(): void {
+  if (focusResyncInstalled || typeof document === "undefined") return;
+  focusResyncInstalled = true;
+  let hiddenSince: number | null = null;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      hiddenSince = Date.now();
+      return;
+    }
+    // Only on a real absence. Alt-tabbing between two windows must
+    // not fire a catalog sync on every switch.
+    if (hiddenSince !== null && Date.now() - hiddenSince >= FOCUS_RESYNC_AFTER_MS) {
+      videoStore.syncWithServer().catch(() => {/* logged inside */});
+    }
+    hiddenSince = null;
+  });
 }
