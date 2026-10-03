@@ -253,12 +253,38 @@ function timeScore(target: string | null, candidate: string | null, deltaMin: nu
   return 0;
 }
 
+/**
+ * ADR-048 §Addendum — when a record was actually captured.
+ *
+ * For a YouTube livestream, `recorded_at` has historically been
+ * `publishedAt`: when the VOD appeared, which is after the broadcast
+ * ENDS and can be most of a day later. Record 4b4828dd is titled
+ * "4 June 2026" and carries 2026-06-05T22:58:30Z. Every gate in this
+ * module is date-proximity, so the wrong instant means the Zoom
+ * recording it was broadcast from is never even considered.
+ *
+ * `resolveAlignedTitle` already solved this one layer up and this
+ * deliberately mirrors its precedence rather than inventing a second
+ * rule — two different answers to "when did this happen" is how a
+ * record gets a title from one timestamp and a sibling from another.
+ *
+ * Only livestreams carry these keys, so Zoom/Fireflies/Kaltura
+ * records are unaffected.
+ */
+export function effectiveRecordedAt(rec: VideoRecordJSON): string | null {
+  const me = (rec.metadata_extra ?? {}) as Record<string, unknown>;
+  const liveStart = typeof me.actual_start_time === "string" ? me.actual_start_time
+                  : typeof me.scheduled_start_time === "string" ? me.scheduled_start_time
+                  : null;
+  return liveStart ?? rec.recorded_at ?? rec.indexed_at ?? null;
+}
+
 export function rankSiblingCandidates(
   target: VideoRecordJSON,
   all: VideoRecordJSON[],
   limit = 3,
 ): SiblingCandidate[] {
-  const targetRecorded = target.recorded_at ?? target.indexed_at;
+  const targetRecorded = effectiveRecordedAt(target);
   const candidates: SiblingCandidate[] = [];
 
   // Clips (target itself is an OpusClip child) never look for
@@ -278,7 +304,7 @@ export function rankSiblingCandidates(
     // hundreds of shorts they've produced.
     if (v.source_platform === "OpusClip") continue;
 
-    const candidateRecorded = v.recorded_at ?? v.indexed_at;
+    const candidateRecorded = effectiveRecordedAt(v);
     const participant_overlap = participantJaccard(target.participants ?? [], v.participants ?? []);
     const time_delta_minutes = timeDeltaMinutes(targetRecorded, candidateRecorded);
 

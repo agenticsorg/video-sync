@@ -19,6 +19,12 @@ export interface YouTubeVideoInfo {
   thumbnailUrl: string | null;
   privacyStatus: string;
   liveBroadcastContent: string;
+  /** From liveStreamingDetails — null on an ordinary upload.
+   *  actualStartTime is when the broadcast BEGAN, which is the only
+   *  timestamp that lines up with the source recording. */
+  actualStartTime: string | null;
+  scheduledStartTime: string | null;
+  actualEndTime: string | null;
 }
 
 function parseDuration(iso: string): number {
@@ -51,7 +57,12 @@ async function handler(req: NextRequest) {
   }
 
   const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-  url.searchParams.set("part", "snippet,contentDetails,status");
+  // liveStreamingDetails carries actualStartTime — when the broadcast
+  // actually began. snippet.publishedAt is when the VOD was published,
+  // which for a livestream is after it ends and can be most of a day
+  // later. ADR-048 §Addendum: sibling matching is a date-proximity
+  // gate, so the wrong timestamp means the pair is never considered.
+  url.searchParams.set("part", "snippet,contentDetails,status,liveStreamingDetails");
   url.searchParams.set("id", videoId);
   url.searchParams.set("key", apiKey);
 
@@ -80,6 +91,9 @@ async function handler(req: NextRequest) {
   }
 
   const snippet = item.snippet ?? {};
+  const live = (item.liveStreamingDetails ?? {}) as {
+    actualStartTime?: string; scheduledStartTime?: string; actualEndTime?: string;
+  };
   const contentDetails = item.contentDetails ?? {};
   const status = item.status ?? {};
 
@@ -97,6 +111,11 @@ async function handler(req: NextRequest) {
     thumbnailUrl,
     privacyStatus: status.privacyStatus ?? "unknown",
     liveBroadcastContent: snippet.liveBroadcastContent ?? "none",
+    // Present only on a livestream. Absent on an ordinary upload,
+    // which is how callers tell the two apart.
+    actualStartTime: live.actualStartTime ?? null,
+    scheduledStartTime: live.scheduledStartTime ?? null,
+    actualEndTime: live.actualEndTime ?? null,
   };
 
   return NextResponse.json(info);

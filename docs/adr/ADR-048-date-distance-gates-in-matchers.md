@@ -204,3 +204,47 @@ So the calendar day is the rule and the straddle window is the exception, sized 
 - `web/tests/siblingMatcher.test.ts`: coverage for the date gate, added with the 2026-09-09 addendum
 - `web/src/lib/youtubeUploadsCache.ts`: implementation of the 90d gate + sharper tiered boost
 - `memory/feedback_dedupe_threshold.md`: recorded preference for manual bulk-accept in the mid-confidence band — this ADR is the upstream complement that prevents bad candidates from reaching the threshold in the first place
+
+---
+
+## Addendum: A Livestream's `recorded_at` Was the Wrong Instant (2026-10-03)
+
+**Addendum to**: the date-proximity gates, which assume `recorded_at` is when the recording started.
+
+For a YouTube livestream it was not. `youtubeIngest` stored `recorded_at: info.publishedAt` — when the VOD was published, which happens *after* the broadcast ends and can be most of a day later. Every gate in `siblingMatcher` is date-proximity, so the wrong instant changes the answer.
+
+Measured on the live catalog, 2026-10-03:
+
+- 30 of 78 YouTube records carry no upstream link; **12 of those are Fridays**, the Hackerspace day.
+- Deltas from an orphaned YouTube record to a same-day Zoom record: **614, 433 and 784 minutes** — all far outside `BROADCAST_MAX_DELTA_MIN` (60).
+- `actual_start_time` was captured on **0 of 78** records. Only `YouTubeLiveImport` ever populated it; the mainline ingest never asked the API for it.
+
+`resolveAlignedTitle` had already solved this one layer up, and its comment describes the exact case found in the data — *"a session that started 22:00 local June 4 but ended 22:58 UTC June 5 would then get '5 Jun'"*. That is record `4b4828dd` verbatim. So the title resolver and the sibling matcher disagreed about when the same event happened.
+
+### Two distinct failures, not one
+
+The first reading of this was that the pair is "never considered". Measurement showed that is true only half the time:
+
+| YouTube timestamp | Candidates | Relation |
+|---|---|---|
+| same-day `publishedAt`, 433 min out | 1 | `SameEvent` — surfaced, but the broadcast provenance is lost |
+| next-day `publishedAt` | **0** | `isSameEventDay` rejects it before any scoring |
+| `actualStartTime`, ~15 min out | 1 | `BroadcastedFrom` — correct |
+
+Both failures are fixed by the same change, but they are worth distinguishing: the same-day case produces a *weaker* link that looks like success, which is harder to notice than an absent one.
+
+### Resolved
+
+- `/api/youtube/video-info` requests `liveStreamingDetails` and returns `actualStartTime`, `scheduledStartTime`, `actualEndTime`. The data was always one query parameter away.
+- `youtubeIngest` prefers `actualStartTime` for `recorded_at`, keeping `publishedAt` as `metadata_extra.youtube_published_at` so the substitution is visible and reversible.
+- `siblingMatcher.effectiveRecordedAt()` applies the same precedence, **mirroring `resolveAlignedTitle` rather than inventing a second rule** — two different answers to "when did this happen" is how a record ends up with a title from one timestamp and a sibling from another. Records without these keys (Zoom, Fireflies, Kaltura) are unaffected.
+
+### The offset is one-directional, and the 60-minute bound already allows for it
+
+Per the operator: the Zoom recording starts at the top of the pre-show while the livestream starts near the scheduled time, so **the broadcast begins after the recording** — typically by the pre-show length of about 15 minutes, but it varies. `BROADCAST_MAX_DELTA_MIN` is 60 and its comment already anticipated this (*"operators start broadcasts at the top of the hour"*), so no threshold change is needed.
+
+Some sessions relay `Zoom → Restream → {LinkedIn, YouTube Live}` rather than pushing RTMP directly, which adds further delay. Restream is deliberately **not** added to `MEETING_SOURCE_PLATFORMS`: that set is for platforms that produce a record, and a relay produces none. `BroadcastedFrom` remains correct whether or not a relay sat in the middle. LinkedIn destinations are not tracked at all — for relayed sessions the catalog records at most half the distribution.
+
+### Not addressed here
+
+Chapter YouTube channels (London, New Zealand) are out of scope by decision. Discovery is scoped by `channels?mine=true`, so a broadcast landing on a channel outside the importing operator's token is never found — not an orphan but an absence, invisible from the catalog. Channel attribution is recorded on 0 of 78 records, so the gap cannot currently be measured retrospectively either. This matters only once chapter channels come into scope.

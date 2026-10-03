@@ -218,9 +218,22 @@ export async function ingestYouTubeSourceRow(
     download_url: `youtube://${youtubeVideoId}`,
     thumbnail_url: info.thumbnailUrl ?? undefined,
     tags,
-    recorded_at: info.publishedAt,
+    // ADR-048 §Addendum — publishedAt is when the VOD was published,
+    // which for a livestream is after it ENDS. Record 4b4828dd is
+    // titled "4 June 2026" with publishedAt 2026-06-05T22:58:30Z: a
+    // day out, and far outside siblingMatcher's 60-minute gate, so
+    // the Zoom recording it was broadcast from is never considered.
+    // actualStartTime is the broadcast's real start.
+    recorded_at: info.actualStartTime ?? info.publishedAt,
     metadata_extra: {
       channel: info.channelTitle,
+      // Kept alongside recorded_at so the substitution is visible
+      // and reversible, and so a later matcher can use the live
+      // window rather than a single instant.
+      ...(info.actualStartTime ? { actual_start_time: info.actualStartTime } : {}),
+      ...(info.scheduledStartTime ? { scheduled_start_time: info.scheduledStartTime } : {}),
+      ...(info.actualEndTime ? { actual_end_time: info.actualEndTime } : {}),
+      youtube_published_at: info.publishedAt,
       privacy_status: info.privacyStatus,
       live_broadcast_content: info.liveBroadcastContent,
       ...(isLive ? { live_broadcast: "1" } : {}),
