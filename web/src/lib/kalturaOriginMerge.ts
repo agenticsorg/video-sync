@@ -373,6 +373,20 @@ export async function runKalturaOriginMerge(
   return totals;
 }
 
+/** A record's metadata_extra as it stands right now, from the store. */
+export function currentExtra(recordId: string): Record<string, unknown> {
+  const r = videoStore.getAll().find(x => x.id === recordId);
+  return ((r as (VideoRecordJSON & { metadata_extra?: unknown }) | undefined)?.metadata_extra ?? {}) as Record<string, unknown>;
+}
+
+/** Keys present before a write and absent after it. */
+export function droppedKeys(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): string[] {
+  return Object.keys(before).filter(k => !(k in after));
+}
+
 // ── Backfill driver ─────────────────────────────────────────────────
 
 export interface OriginBackfillProgressEvent {
@@ -485,9 +499,43 @@ export async function runKalturaOriginBackfill(
 
     try {
       const patch = originPatch(facts);
-      const edits: Record<string, unknown> = { metadata_extra: patch.metadata_extra };
+
+      // Carry the record's EXISTING metadata_extra keys in the patch
+      // explicitly, rather than relying on the aggregate's shallow
+      // merge to preserve them.
+      //
+      // On 2026-09-29 this backfill destroyed four keys —
+      // kaltura_original_title, player_url and both title_aligned_*
+      // — on both records that had any (catalog.json generations
+      // 1790709694686195 -> 1790724730490401). The Rust merge in
+      // apply_metadata_edits is correct and the exact payload,
+      // replayed against the real WASM, preserves everything. The
+      // mechanism was never isolated.
+      //
+      // So this does not rely on knowing it. A patch that restates
+      // what is already there produces the same result whether the
+      // aggregate merges or replaces, which removes the whole class
+      // of failure rather than the one instance of it.
+      const before = currentExtra(w.record_id);
+      const merged: Record<string, unknown> = { ...before, ...patch.metadata_extra };
+
+      const edits: Record<string, unknown> = { metadata_extra: merged };
       if (patch.recorded_at) edits.recorded_at = patch.recorded_at;
       videoStore.mutate(w.record_id, (r) => r.update_metadata(actorCommand(actorState, { edits })));
+
+      // Verify. If a key present before is gone after, stop the run:
+      // whatever removed it will remove it from every remaining
+      // record, and a loud halt beats a quiet sweep through the rest.
+      const lost = droppedKeys(before, currentExtra(w.record_id));
+      if (lost.length > 0) {
+        const msg = `Origin backfill HALTED — writing ${w.record_id.slice(0, 8)} dropped metadata keys ${lost.join(", ")}. `
+          + "No further records will be touched. This is the 2026-09-29 data-loss guard.";
+        log?.(msg, { video_id: w.record_id });
+        totals.errors++;
+        emit({ kind: "error", error: msg });
+        onEvent({ type: "complete", total: work.length, totals });
+        return totals;
+      }
 
       const origin = patch.origin;
       if (origin) {

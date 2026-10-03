@@ -23,6 +23,7 @@ import {
   findRecordsMissingZoomOriginLink,
   hasZoomOriginLink,
   zoomOriginLinkCmd,
+  droppedKeys,
   MERGEABLE,
 } from "../src/lib/kalturaOriginMerge";
 import type { VideoRecordJSON } from "../src/lib/wasm";
@@ -229,5 +230,72 @@ describe("zoomOriginLinkCmd", () => {
     // ScreenRecordingOf / ClipOf / BroadcastedFrom describes "another
     // platform ingested this recording".
     expect(zoomOriginLinkCmd({ meeting_uuid: UUID }, null).relation).toBe("SameEvent");
+  });
+});
+
+/**
+ * The 2026-09-29 data loss.
+ *
+ * Running the origin backfill destroyed four metadata_extra keys —
+ * kaltura_original_title, player_url, title_aligned_source and
+ * title_aligned_matched_series — on both records that had any
+ * (catalog.json generations 1790709694686195 -> 1790724730490401,
+ * records 06dbb971 and 9b0bdef2). Nine other Kaltura records appeared
+ * affected but had already lost theirs earlier; the backfill was 2
+ * for 2 on records that had something to lose.
+ *
+ * The Rust shallow merge is correct and passes its own tests, and the
+ * exact payload replayed against the real WASM preserves everything.
+ * The mechanism was never isolated, so the fix does not depend on
+ * knowing it: the patch restates the keys already present, which
+ * gives the same result whether the aggregate merges or replaces.
+ */
+describe("data-loss guard", () => {
+  it("restates existing keys so a replace is as safe as a merge", () => {
+    const before = {
+      kaltura_original_title: "Mobile Hackerspace on Wheels",
+      player_url: "https://video.agentics.org/media/t/1_b8kw2g8u",
+      title_aligned_source: "series_registry",
+      title_aligned_matched_series: "Friday Hackerspace Live Events",
+    };
+    const patch = originPatch({
+      reference_id: REF, admin_tags: "zoomentry",
+      category_ids: ["364214852"], created_at: "2026-09-25T18:13:49Z",
+    }).metadata_extra;
+
+    const merged: Record<string, unknown> = { ...before, ...patch };
+
+    // Everything that was there is still there...
+    for (const k of Object.keys(before)) expect(merged).toHaveProperty(k);
+    // ...and the new provenance landed.
+    expect(merged.zoom_meeting_uuid).toBe(UUID);
+    // The whole point: even a WHOLESALE REPLACE with this object
+    // loses nothing, which is what makes the fix independent of the
+    // mechanism we could not reproduce.
+    expect(droppedKeys(before, merged)).toEqual([]);
+  });
+
+  it("a patch that does NOT restate existing keys loses them under replace", () => {
+    // The old behaviour, kept as the thing being guarded against.
+    const before = { player_url: "x", kaltura_original_title: "y" };
+    const patchOnly = originPatch({
+      reference_id: REF, admin_tags: null, category_ids: [],
+      created_at: "2026-09-25T18:13:49Z",
+    }).metadata_extra;
+    expect(droppedKeys(before, patchOnly).sort()).toEqual(["kaltura_original_title", "player_url"]);
+  });
+});
+
+describe("droppedKeys", () => {
+  it("names what a write removed", () => {
+    expect(droppedKeys({ a: 1, b: 2 }, { a: 1 })).toEqual(["b"]);
+  });
+  it("is silent when nothing went missing", () => {
+    expect(droppedKeys({ a: 1 }, { a: 9, b: 2 })).toEqual([]);
+  });
+  it("treats a key set to undefined as still present", () => {
+    // `in` rather than a truthiness check: a key legitimately set to
+    // null by a patch must not read as data loss.
+    expect(droppedKeys({ a: 1 }, { a: undefined })).toEqual([]);
   });
 });
