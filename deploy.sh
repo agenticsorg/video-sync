@@ -96,8 +96,49 @@ fi
 # Type-check before docker build. Next.js's in-build worker OOMs in this
 # devcontainer at ~30+ routes; we run tsc separately here so type errors
 # fail fast (and don't get hidden by next.config's ignoreBuildErrors).
+#
+# Run in TWO passes by default, not one.
+#
+# tsconfig includes both `**/*.ts` and `.next/types/**/*.ts`. After a
+# build the latter is ~96 generated files, each pulling in a whole
+# route's dependency graph, which roughly doubles the program. On
+# 2026-10-03, with the IDE language server resident and no swap, the
+# single pass was killed at 25s with ZERO output — no type errors,
+# just a dead process, and the deploy correctly aborted without
+# shipping. Twice.
+#
+# Splitting is equivalent coverage, not a weaker check: tsc follows
+# imports regardless of which files are listed as roots, so the
+# routes pass already checks every source file a route reaches, and
+# the source pass covers the rest. Each half fits in ~2.7GB.
+#
+# SINGLE_TYPECHECK=1 forces the old one-pass behaviour.
 echo "==> Pre-flight type check (tsc --noEmit)"
-( cd web && NODE_OPTIONS="--max-old-space-size=6144" npx tsc --noEmit )
+if [ "${SINGLE_TYPECHECK:-0}" = "1" ]; then
+  ( cd web && NODE_OPTIONS="--max-old-space-size=6144" npx tsc --noEmit )
+else
+  (
+    cd web
+    cleanup() { rm -f tsconfig.deploy-src.json tsconfig.deploy-routes.json; }
+    trap cleanup EXIT
+    python3 - <<'TSCONF'
+import json, re
+cfg = json.loads(re.sub(r'//.*', '', open('tsconfig.json').read()))
+src = dict(cfg); src['include'] = [i for i in cfg['include'] if not i.startswith('.next')]
+rts = dict(cfg); rts['include'] = ['next-env.d.ts', '.next/types/**/*.ts']
+json.dump(src, open('tsconfig.deploy-src.json', 'w'))
+json.dump(rts, open('tsconfig.deploy-routes.json', 'w'))
+TSCONF
+    echo "    pass 1/2 — source"
+    NODE_OPTIONS="--max-old-space-size=4096" npx tsc --noEmit -p tsconfig.deploy-src.json
+    if [ -d .next/types ]; then
+      echo "    pass 2/2 — generated route contracts"
+      NODE_OPTIONS="--max-old-space-size=4096" npx tsc --noEmit -p tsconfig.deploy-routes.json
+    else
+      echo "    pass 2/2 — SKIPPED: .next/types absent, run a build to check route contracts" >&2
+    fi
+  )
+fi
 
 SHA=$(git rev-parse --short HEAD)
 IMAGE="us-central1-docker.pkg.dev/agentics-487016/video-sync/app"
